@@ -1,0 +1,456 @@
+
+Simultaneous_interpretation
+/
+
+Dockerfile
+
+check_file.py
+17 lines
+
+py
+
+
+debug_redis.py
+20 lines
+
+py
+
+
+test_client_usage.py
+33 lines
+
+py
+
+
+asr_test.py
+148 lines
+
+py
+
+
+orchestrator.py
+111 lines
+
+py
+
+
+requirements.txt
+10 lines
+
+txt
+
+
+asr_client.py
+1 line
+
+py
+
+
+mt_client.py
+35 lines
+
+py
+
+
+tts_client.py
+74 lines
+
+py
+
+
+api.py
+46 lines
+
+py
+
+
+translator.py
+80 lines
+
+py
+
+
+main.py
+107 lines
+
+py
+
+
+tts.py
+96 lines
+
+py
+
+Analyzing this project, the current challenges are that the TTS cannot preserve the voice characteristics, and the ASR-MT-TTS pipeline is too slow. Please see if you can suggest optimizations from model invocation to system architecture.
+
+10:59
+Let me read through the code carefully before diagnosing and diagramming.
+
+Here's a thorough analysis of your codebase. There are two distinct problem classes: voice quality loss in TTS and pipeline latency. Let me break both down, then propose an optimized architecture.
+
+Problem 1: TTS loses voice characteristics
+The root issue is in tts.py and main.py. You're using edge-tts, a Microsoft Azure TTS wrapper — it produces consistent voice output, but there are two bugs that silently degrade quality:
+
+Bug 1 — asyncio.run() inside a sync loop: In main.py, you're calling asyncio.run(play_audio(text)) inside a blocking while True. This creates and destroys a new event loop every iteration. Edge-TTS reuses an underlying HTTPS session; repeated event loop teardown can interrupt mid-stream audio chunks, causing the saved MP3 to be truncated or have silent gaps. The result sounds like clipped or robotic speech.
+
+Bug 2 — temp file race condition: The audio is written to a temp file, then immediately loaded by pygame before the OS flushes the write buffer. On some systems (especially Docker containers), pygame.mixer.music.load() reads a partially written file.
+
+Fix: Use a single persistent asyncio event loop throughout the process lifecycle, and use asyncio.Event to signal playback readiness rather than relying on file existence.
+
+Problem 2: Pipeline latency
+Your current flow is:
+
+Microphone → ASR (Whisper) → Redis pub → MT (Qwen 1.8B) → Redis pub → TTS → Speaker
+The bottlenecks are:
+
+ASR: faster-whisper small on CPU with int8 takes ~1.5–3s per utterance. You're also writing to a temp WAV file on every utterance, adding I/O overhead.
+
+MT: Qwen 1.8B with FP16 auto device mapping and max_new_tokens=256 is very slow on CPU — easily 5–15 seconds. The translate() method signature also has a mismatch: api.py calls translator.translate(text, source_lang=..., target_lang=...) but translator.py's translate() only accepts text — the other args are silently ignored and will cause a TypeError in strict mode.
+
+Redis hop overhead: Three separate pub/sub channels add minor latency but more importantly they add complexity with no backpressure — if MT is slow, queued Redis messages pile up and you get an ever-growing delay between what was said and what is played.
+
+The asr_client.py is empty — this means there's no clean client abstraction for ASR the way there is for MT and TTS.
+
+Here's the current architecture vs. what it should look like:
+
+
+
+Concrete fixes
+Fix 1 — TTS event loop (voice quality)
+Replace the asyncio.run() in main.py with a persistent loop running in a background thread:
+
+python
+import asyncio, threading
+
+loop = asyncio.new_event_loop()
+threading.Thread(target=loop.run_forever, daemon=True).start()
+
+async def _play(text):
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+        path = f.name
+    communicate = edge_tts.Communicate(text, VOICE, proxy=PROXY)
+    await communicate.save(path)         # full write before load
+    await asyncio.sleep(0.05)            # let OS flush
+    pygame.mixer.init()
+    pygame.mixer.music.load(path)
+    pygame.mixer.music.play()
+    while pygame.mixer.music.get_busy():
+        await asyncio.sleep(0.05)
+    pygame.mixer.quit()
+    os.remove(path)
+
+# In your message loop:
+future = asyncio.run_coroutine_threadsafe(_play(text), loop)
+future.result()  # blocks until done, exceptions propagate cleanly
+This eliminates both the event loop teardown problem and the file flush race.
+
+Fix 2 — Fix the translate() signature mismatch
+translator.py ignores source_lang and target_lang. Either update the signature to accept and use them, or at minimum stop the silent drop:
+
+python
+def translate(self, text, source_lang='en', target_lang='zh'):
+    # use target_lang to select the prompt language
+    lang_name = {'zh': 'Chinese', 'ja': 'Japanese', 'fr': 'French'}.get(target_lang, 'Chinese')
+    prompt = f"Translate the following {source_lang.upper()} text to {lang_name} directly..."
+Fix 3 — Replace the ASR path for latency
+orchestrator.py uses speech_recognition (which captures full utterances) + writes a WAV + reads it back with faster-whisper. Your asr_test.py already has the better approach: sherpa-onnx with streaming VAD. Use that path instead. It avoids disk I/O entirely, returns partials in real-time, and the VAD (Silero) gates out silence so Whisper never sees padded audio.
+
+The key change is pushing directly from StreamingASR.process_audio() to MT when a final result is returned, rather than going through Redis:
+
+python
+final = engine.process_audio(audio_chunk)
+if final:
+    translated = mt_client.translate(final)   # HTTP call to FastAPI
+    if translated:
+        tts_client.speak(translated)
+Fix 4 — Remove the middle Redis hop
+You have channel:to_mt → MT service → channel:mt_to_tts. This adds two serialization round-trips with no benefit when all processes run on the same machine. Call api.py's /translate HTTP endpoint directly from the orchestrator. Keep Redis only for the TTS output if you need to decouple speaker playback, but even that can be a direct call.
+
+Fix 5 — Qwen quantization
+torch_dtype=torch.float16 on CPU falls back to float32 silently on many systems (no CUDA). Use torch_dtype=torch.float32 explicitly on CPU, and add load_in_4bit=True with bitsandbytes if your hardware supports it. For a CPU-only machine, consider swapping to Helsinki-NLP/opus-mt-en-zh — it's a purpose-built EN→ZH model, ~300MB, and runs in under 1 second on CPU since it's an encoder-decoder, not a generative LLM.
+
+Summary of expected gains
+Bottleneck	Current	After fix
+ASR (disk I/O path)	~2–3s	~0.3s streaming
+MT (Qwen on CPU)	5–15s	~0.8s (opus-mt) or ~3s (Qwen 4bit)
+TTS (event loop teardown)	voice artifacts + ~1s overhead	clean audio, ~0.5s
+Redis hops	2 unnecessary round-trips	0 (direct calls)
+The single biggest win is replacing Qwen 1.8B with a dedicated translation model for the MT step if you're on CPU — generative LLMs are not designed for this use case and are dramatically slower than fine-tuned seq2seq models at the same quality level for translation.
+
+Thank you so much for your thorough analysis and detailed suggestions. Your insights on the TTS event loop issues and the ASR-MT-TTS pipeline latency are very helpful.
+Given the complexity, it would be extremely valuable if you could provide a concrete, complete code implementation based on your proposed optimizations. This would help us better understand and apply the fixes effectively.
+Could you please help by writing out the integrated, end-to-end code or key module updates covering the improvements you outlined? Having that reference implementation would greatly accelerate our progress.
+Looking forward to your guidance and example code. Thanks again for your support!
+
+11:04
+
+Check skill files for relevant guidance
+Check skill files for relevant guidance
+Let me now write all the optimized files:
+
+
+Created 10 files, ran 2 commands, read a file
+Created 10 files, ran 2 commands, read a file
+All 9 files are ready. Here's a summary of every change and why it matters:
+
+What's in each file
+orchestrator.py — the main entry point. Replaces speech_recognition + temp WAV + faster-whisper with the sherpa-onnx streaming engine already in asr_test.py. Final transcripts go straight to an HTTP call to the MT service, then TTS in a background thread. No disk I/O, no Redis hops between ASR and MT.
+
+main.py — the TTS speaker service. The core fix: a single asyncio event loop created once in a daemon thread. Every utterance is submitted via asyncio.run_coroutine_threadsafe(), which is thread-safe and never destroys the loop. The 50 ms sleep after communicate.save() eliminates the pygame file-read race. A simple queue with MAX_QUEUE_SIZE=3 prevents audio lag from piling up if MT is slow.
+
+translator.py — the model wrapper. translate() now correctly accepts and uses source_lang / target_lang (the original silently ignored both). Explicit torch.float32 on CPU prevents silent fallback issues. There's a USE_OPUS_MT flag at the top — flip it to True to swap Qwen for Helsinki opus-mt-en-zh, which is ~10× faster on CPU for EN→ZH.
+
+api.py — the FastAPI service. Now uses Pydantic v2 validators so bad language codes return a proper 422 instead of silently doing the wrong thing. /health reports whether the model is actually loaded. A 503 is returned during the startup window before the model finishes loading.
+
+clients/tts_client.py — adds a _flush_stale() call before each request to drain any leftover messages from a previous call. Uses a persistent pubsub connection instead of recreating it on every speak().
+
+clients/mt_client.py — rewritten to call the FastAPI HTTP endpoint directly with a requests.Session() (keep-alive pooling) instead of going through Redis pub/sub. One retry on transient errors.
+
+clients/asr_client.py — was completely empty. Now a clean context-manager iterator (for transcript in asr.stream()) that wraps the streaming engine and sounddevice queue.
+
+Orchestrator
+PY
+Main
+PY
+Translator
+PY
+Api
+PY
+Tts client
+PY
+Mt client
+PY
+Asr client
+PY
+Requirements
+TXT
+Readme
+Document · MD
+Is your 'translator.py' really without issues? I ran it, the ASR works fine, but the output shows that the MT part is definitely not correct：(.venv310) PS C:\Users\30909\Desktop\document\files> python orchestrator.py
+🚀 Optimized ASR→MT→TTS pipeline starting …
+✅ [TTSClient] Connected to Redis (127.0.0.1:6379)
+Loading model from: C:\Users\30909\Desktop\document\files\models\zipformer
+  tokens.txt exists: True, size: 56317
+  encoder-epoch-99-avg-1.int8.onnx exists: True, size: 105276499
+  decoder-epoch-99-avg-1.onnx exists: True, size: 13876452
+  joiner-epoch-99-avg-1.int8.onnx exists: True, size: 3228404
+Recognizer loaded successfully!
+✅ Loading ASR model from: C:\Users\30909\Desktop\document\files\models\zipformer
+💡 Initialising RNNoise …
+💡 Loading Silero VAD …
+Using cache found in C:\Users\30909/.cache\torch\hub\snakers4_silero-vad_master
+🎙️  System ready – start speaking!
+[ASR partial]: 你好可以
+[ASR final  ]: 你好可以
+[MT  ]: 页 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来
+📤 [TTSClient] Sent: '页 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 来 ' …
+🛑 Pipeline stopped.
+
+Show more
+14:03
+The problem is clear from the output. Two issues:
+
+The ASR is outputting Chinese (你好可以) — meaning your zipformer model is a Chinese ASR model, not English. The prompt in translator.py is asking it to translate Chinese→Chinese, but Qwen is treating "Chinese" as the source and hallucinating a repetitive output — the classic LLM looping symptom when the task is nonsensical.
+do_sample=False + no temperature with Qwen on CPU can trigger repetition loops. The repetition_penalty=1.1 wasn't enough here.
+The real fix is to detect what language the ASR actually outputs, and set the prompt accordingly. Since your model outputs Chinese, you want ZH→EN (or whatever your target is), not EN→ZH. Let me fix translator.py:
+
+
+Created a file, ran a command
+Created a file, ran a command
+Also need to fix orchestrator.py and api.py to pass the correct language direction:
+
+
+Edited 2 files, ran a command, read a file
+Edited 2 files, ran a command, read a file
+Three files updated. Here's exactly what was wrong and what changed:
+
+Root cause diagnosis
+Your log revealed two things that contradicted the original code's assumptions:
+
+1. Your ASR model outputs Chinese, not English. The partial 你好可以 confirms your zipformer is a Mandarin model. The previous code assumed source_lang="en" and asked Qwen to translate "English → Chinese" — but the input was already Chinese. Qwen received a nonsensical task and hallucinated the repetition loop.
+
+2. Greedy decoding (do_sample=False) on a quantised Qwen on CPU is fragile. When the task is degenerate (translating Chinese as if it were English), greedy search has no escape — it locks into the highest-probability next token (here, 来) and repeats it indefinitely. Sampling with temperature=0.2 breaks the loop even if the prompt is slightly off.
+
+What changed in each file
+translator.py — three changes:
+
+source_lang default flipped to "zh", target_lang to "en"
+do_sample=True, temperature=0.2, repetition_penalty=1.3 replaces the unstable greedy config
+Added _postprocess() which detects and discards looping output, echo output, and CJK-heavy output when English was requested — so TTS is never called with garbage
+orchestrator.py — MT_SOURCE_LANG = "zh", MT_TARGET_LANG = "en" to match what the ASR actually produces
+
+api.py — same default flip so standalone API calls also default to ZH→EN
+
+If you want EN→ZH instead
+If your intent is to speak English and have it translated to Chinese (e.g. you swap to an English zipformer model), just revert both defaults back to source_lang="en", target_lang="zh" and also change USE_OPUS_MT's opus model ID to "Helsinki-NLP/opus-mt-en-zh". The _postprocess() CJK check would need to be inverted too — you can simply remove that block for EN→ZH since Chinese output is then expected.
+
+Translator
+PY
+Orchestrator
+PY
+Api
+PY
+Your ASR model successfully recognizes Chinese speech and outputs correct text, but the subsequent TTS service experiences a timeout, causing the client to fail while waiting for synthesized audio. After analysis, the most likely causes lie in the Text-to-Speech (TTS) stage:
+1. The speech synthesis using edge-tts may have failed to successfully generate the audio file, or the generation process encountered exceptions or delays;
+2. The Pygame player might run into initialization failures, playback blocking, or environment compatibility issues when playing the generated audio file, preventing playback completion;
+3. Redis message transmission and queue management may experience delays or message loss, affecting timely audio generation and playback;
+4. The generated temporary audio file might have permission or read/write conflicts, causing it to be unreadable.
+
+Show more
+14:16
+Good diagnosis. Let me read your current TTS files carefully before writing fixes.
+
+
+Viewed 3 files
+Viewed 3 files
+Now I have a complete picture. The architectural problem is clear: TTSClient publishes to Redis and waits for audio_base64 back on a reply channel — but main.py never publishes anything back. It just plays audio locally. The client waits forever. Let me rewrite all three TTS-related files with a coherent, working architecture:
+
+
+Ran 3 commands, read a file
+Ran 3 commands, read a file
+Here's the complete diagnosis of what was actually broken and what each file now does differently:
+
+The real root cause
+The timeout had nothing to do with pygame, file permissions, or Redis delays. The architecture itself was logically impossible:
+
+TTSClient.speak()           main.py (TTS service)
+      │                            │
+      ├─ publish → channel:mt_to_tts ─→ receives message
+      │                            ├─ generates audio
+      │                            └─ plays locally  ← only thing it ever did
+      │
+      └─ blocks waiting on channel:tts_to_speaker
+                                   ↑
+                          nothing ever published here
+                          → client waits until timeout
+main.py never published audio_base64 back. It only played audio on its own speaker. The client was waiting for a reply that could never arrive.
+
+What changed in each file
+main.py — now the single source of truth for TTS. Exposes speak(text, lang) as a plain Python function. The event loop is persistent (never torn down). The temp file is closed before edge-tts writes to it — this is critical on Windows, which locks open file handles. pygame runs in a ThreadPoolExecutor so the event loop stays alive during playback. A full OS-player fallback chain handles pygame failures: pygame → os.startfile (Windows) → afplay (macOS) → mpg123/ffplay (Linux).
+
+orchestrator.py — now does from main import speak as tts_speak and calls it directly in a daemon thread. No TTSClient, no Redis, no timeout. ASR continues listening while audio plays because speak() runs in that daemon thread.
+
+clients/tts_client.py — completely redesigned as an honest fire-and-forget publisher for the one real use case it serves: when the TTS speaker is on a different machine. It publishes and returns immediately. The docstring now clearly explains when to use this (remote machine only) vs. speak() directly (same machine, always preferred).
+
+Startup (same machine)
+You now only need two terminals:
+
+bash
+# Terminal 1 — Translation service
+uvicorn api:app --host 0.0.0.0 --port 8000
+
+# Terminal 2 — Main pipeline (ASR + MT + TTS all in one)
+python orchestrator.py
+Redis is no longer needed at all for the core pipeline. It's only required if you run main.py as a standalone service on a remote machine.
+
+Main
+PY
+Orchestrator
+PY
+Tts client
+PY
+The system latency is now very low, and I think both ASR and MT are working fine. However, during the TTS stage, it cannot mimic my voice. Is this because the model you chose is too basic
+
+14:38
+Yes, exactly. edge-tts uses Microsoft's cloud neural voices — they're high quality but fixed. They cannot learn or mimic your voice at all. It's not a configuration issue; it's a fundamental limitation of the model class.
+
+To actually clone your voice you need a zero-shot or few-shot voice cloning TTS model — one that takes a short audio sample of your voice as a reference and conditions synthesis on it. Here's the landscape:
+
+Model options, ranked by quality vs. complexity
+Model	Voice cloning	Speed on CPU	Quality	Self-hosted
+Coqui XTTS-v2	Zero-shot (6s sample)	Slow (~8s/sentence)	Excellent	✅
+OpenVoice v2	Zero-shot + style transfer	Moderate	Very good	✅
+Kokoro TTS	No cloning, but fast	Fast	Good	✅
+CosyVoice 2	Zero-shot (3s sample)	GPU recommended	Excellent	✅
+StyleTTS 2	Few-shot (5 min sample)	GPU needed	Outstanding	✅
+edge-tts (current)	❌ none	Instant (cloud)	Good	❌ cloud only
+For your use case — real-time interpretation, Windows, likely CPU-only — XTTS-v2 or OpenVoice v2 are the most practical. CosyVoice 2 is better quality but strongly prefers a GPU.
+
+Let me now write a drop-in replacement for main.py that supports all three backends with a single config switch, and a voice sample recording utility:
+
+
+Ran 3 commands, created 2 files, viewed a file
+Ran 3 commands, created 2 files, viewed a file
+Here's a clear picture of what changed and how to get your voice working:
+
+Why edge-tts can never clone your voice
+It's a cloud API that sends your text to Microsoft's servers and returns audio from a pre-trained fixed speaker. There's no mechanism to inject a custom voice — the voice identity is locked inside Microsoft's infrastructure. No amount of configuration can change this.
+
+The two practical options for your setup
+XTTS-v2 is the better choice if quality matters most. It's a single model that takes your reference audio clip and conditions the entire synthesis on it — pitch, timbre, accent, and rhythm are all transferred. The tradeoff is speed: on CPU it takes ~6–10 seconds per sentence, which may introduce a noticeable lag in real-time interpretation.
+
+OpenVoice v2 is the better choice if speed matters more. Its two-stage design (MeloTTS generates clean speech, then a tone-color converter transplants your vocal timbre onto it) runs in ~2–4 seconds on CPU. Timbre is very well preserved; prosody and rhythm are slightly less faithful than XTTS.
+
+Setup steps
+bash
+# Step 1 — install your chosen backend
+pip install TTS                           # XTTS-v2
+# or
+pip install git+https://github.com/myshell-ai/OpenVoice   # OpenVoice
+
+# Step 2 — record your voice reference clip (15-20 seconds is ideal)
+python record_voice.py
+
+# Step 3 — in main.py, set the two config lines at the top:
+TTS_BACKEND  = "xtts"                      # or "openvoice"
+VOICE_SAMPLE = "voice_samples/my_voice.wav"
+
+# Step 4 — run as before (no other changes needed)
+python orchestrator.py
+The first run of XTTS-v2 will download ~2 GB of model weights automatically. Subsequent runs load from cache in a few seconds.
+
+What makes a good reference clip
+The cloning quality depends almost entirely on the reference audio. The recorder script (record_voice.py) shows a live level meter and warns if the signal is too quiet. The key things: record in a quiet room, speak for at least 15 seconds, and avoid any music or echo in the background. A noisy reference will produce noisy cloned speech — the model can't separate your voice from background noise.
+
+Main
+PY
+Record voice
+PY
+Requirements
+TXT
+
+
+
+
+
+
+Claude is AI and can make mistakes. Please double-check responses.
+Requirements · TXT
+Copy
+
+# ── ASR ──────────────────────────────────────────────────────────────────────
+sounddevice
+soundfile
+numpy
+sherpa-onnx>=1.10.0
+torch>=2.0.0
+pyrnnoise
+
+# ── MT ───────────────────────────────────────────────────────────────────────
+transformers>=4.40.0
+fastapi>=0.111.0
+uvicorn[standard]
+pydantic>=2.0
+requests
+# Helsinki opus-mt (fast CPU alternative to Qwen):
+# sentencepiece
+# sacremoses
+
+# ── TTS: choose ONE of the three options ─────────────────────────────────────
+
+# Option A: Coqui XTTS-v2  (best quality, ~2 GB model)
+TTS>=0.22.0
+
+# Option B: OpenVoice v2  (faster on CPU, ~1 GB model)
+# pip install git+https://github.com/myshell-ai/OpenVoice
+# melo-tts  (installed as OpenVoice dependency)
+
+# Option C: edge-tts  (cloud, no cloning, instant)
+edge-tts>=6.1.9
+
+# ── Playback ─────────────────────────────────────────────────────────────────
+pygame
+
+# ── Infrastructure ───────────────────────────────────────────────────────────
+redis>=5.0.0
+

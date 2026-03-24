@@ -1,0 +1,17 @@
+.venv310/
+models/
+.env
+voice_samples/
+img.png
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.idea/
+.DS_Store
