@@ -1,157 +1,208 @@
 # ASR -> MT -> TTS Pipeline
 
-一个本地实时语音链路项目，整体流程是：
+一个本地语音链路项目，整体流程是：
 
 `麦克风输入 -> ASR 识别 -> MT 翻译 -> TTS 播报`
 
-当前这套实现偏向本地 CPU 可运行、调试信息清楚、结构简单，适合继续迭代。
+当前版本已经接通了：
+- 本地 ASR
+- 远程 MT
+- 可切换的本地 / 远程 TTS
 
-## Features
+适合继续做实时语音翻译、语音助手、语音交互类实验。
 
-- 实时语音识别：使用 `sherpa-onnx` 的流式 Zipformer ASR
-- 语音活动检测：使用 `Silero VAD`
-- 降噪：使用 `RNNoise`
-- 翻译服务：使用 `FastAPI` 提供 `/translate`
-- 文本转语音：支持 `XTTS v2`、`OpenVoice v2`、`edge-tts`
-- 语音克隆：可读取 `voice_samples/my_voice.wav` 作为参考音频
-- 串行 TTS 队列：避免后一条播报打断前一条
-- 详细日志：方便确认当前到底选中了哪个模型、设备和运行模式
+## Current Stack
 
-## Current Default Stack
+当前代码默认和可选链路如下：
 
-按当前代码默认配置，项目实际使用的是：
-
-- ASR: `models/zipformer`
+- ASR: `sherpa-onnx` + `zipformer`
 - VAD: `snakers4/silero-vad`
-- Denoiser: `RNNoise`
-- MT: `Helsinki-NLP/opus-mt-zh-en`
-- TTS backend: `xtts`
-- TTS model: `tts_models/multilingual/multi-dataset/xtts_v2`
-- Voice reference: `voice_samples/my_voice.wav`
+- Denoise: `RNNoise`
+- MT: `DeepSeek API`
+- TTS primary: `Qwen TTS VC API`
+- TTS fallback: `XTTS v2`
+
+也就是说，当前 TTS 的实际策略是：
+
+- 如果 `.env` 里 `USE_QWEN_TTS_API=true`，优先使用 Qwen TTS
+- 如果 Qwen 失败，则自动回退到本地 XTTS
 
 ## Project Structure
 
 ```text
 files/
-├─ orchestrator.py      # 主流程入口：ASR -> MT -> TTS
-├─ main.py              # TTS 模块，支持 XTTS / OpenVoice / edge-tts
-├─ api.py               # FastAPI 翻译服务
-├─ translator.py        # 翻译模型封装
-├─ record_voice.py      # 录制语音克隆参考音频
-├─ test.py              # 简单的 ASR 模型检查脚本
+├─ orchestrator.py         # 主入口：ASR -> MT -> TTS
+├─ main.py                 # TTS 模块：Qwen TTS / XTTS / OpenVoice / edge-tts
+├─ create_qwen_voice.py    # 创建 Qwen voice 的脚本
+├─ api.py                  # 历史保留的本地翻译 API
+├─ translator.py           # 历史保留的本地翻译封装
+├─ record_voice.py         # 录制参考音频
 ├─ requirements.txt
+├─ README.md
 ├─ models/
-│  ├─ zipformer/        # ASR 模型
-│  └─ ...               # 其它模型目录
-├─ voice_samples/
-│  └─ my_voice.wav      # 默认参考音频
-└─ clients/             # 历史遗留客户端代码
+│  └─ zipformer/           # 本地 ASR 模型
+└─ voice_samples/
+   └─ my_voice.wav         # 默认参考音频
 ```
 
 ## How It Works
 
 ### 1. ASR
 
-[`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 使用流式 `Zipformer` 模型持续接收麦克风音频。
+[`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 中的 `StreamingASR` 负责实时识别。
 
-- `RNNoise` 先做轻量降噪
-- `Silero VAD` 判断是否有人声
-- 静音持续一段时间后，把当前识别结果视为一句完整语句
+当前实现：
+- `sherpa-onnx` 的 `zipformer` 负责识别
+- `RNNoise` 做降噪
+- `Silero VAD` 判断静音和断句
+
+静音持续一段时间后，会把当前识别结果视为一句完整语音。
 
 ### 2. MT
 
-识别结果会通过 HTTP POST 发给 [`api.py`](/C:/Users/30909/Desktop/document/files/api.py)：
+当前翻译直接在 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 中调用 `DeepSeek API`。
 
-- 默认地址：`http://127.0.0.1:8000/translate`
-- 默认语言方向：`zh -> en`
+默认方向：
+- `zh -> en`
 
-翻译实际由 [`translator.py`](/C:/Users/30909/Desktop/document/files/translator.py) 完成。
-
-当前默认：
-
-- `USE_OPUS_MT = True`
-- 使用 `Helsinki-NLP/opus-mt-zh-en`
-
-如果改成 `False`，则会切到本地 Qwen 翻译模型。
+相关环境变量：
+- `DEEPSEEK_API_KEY`
+- `DEEPSEEK_BASE_URL`
+- `DEEPSEEK_MODEL`
 
 ### 3. TTS
 
-翻译后的文本会进入 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 里的串行 TTS 队列：
+[`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 会把翻译结果送进串行 TTS 队列，避免后一条播报打断前一条。
 
-- 新句子先入队
-- 后台 worker 逐条播放
-- 避免多个 TTS 任务并发抢占音频设备
+真正的语音合成在 [`main.py`](/C:/Users/30909/Desktop/document/files/main.py) 中完成。
 
-[`main.py`](/C:/Users/30909/Desktop/document/files/main.py) 负责真正的语音合成。
+当前 TTS 路由：
+- 主路由：`Qwen TTS VC API`
+- 回退路由：`XTTS v2`
 
-当前默认：
+如果启用了 Qwen：
+- `main.py` 会优先走远程 Qwen TTS
+- 如果远程失败，会自动回退到本地 XTTS
 
-- `TTS_BACKEND = "xtts"`
-- 参考音频：`voice_samples/my_voice.wav`
+## Requirements
 
-## Setup
+建议环境：
+- Python `3.10`
 
-建议使用 Python 3.10 虚拟环境。
-
-### 1. Install dependencies
+安装依赖：
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-如果你需要更完整的 MT/TTS 支持，可能还需要按具体后端安装附加依赖：
+## Environment Variables
 
-- XTTS:
+项目主要依赖 [`.env`](/C:/Users/30909/Desktop/document/files/.env) 配置。
 
-```powershell
-pip install TTS
+### DeepSeek MT
+
+```env
+DEEPSEEK_API_KEY=your_key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
 ```
 
-- OpenVoice:
+### Qwen TTS
 
-```powershell
-pip install git+https://github.com/myshell-ai/OpenVoice
+```env
+DASHSCOPE_API_KEY=your_key
+USE_QWEN_TTS_API=true
+QWEN_TTS_MODEL=qwen3-tts-vc-2026-01-22
+QWEN_TTS_VOICE=your_voice_id
+QWEN_TTS_BASE_HTTP_API_URL=https://dashscope.aliyuncs.com/api/v1
 ```
 
-- edge-tts:
+### XTTS Fallback
 
-```powershell
-pip install edge-tts
+[`main.py`](/C:/Users/30909/Desktop/document/files/main.py) 中默认配置：
+
+```python
+TTS_BACKEND = "xtts"
+VOICE_SAMPLE = "voice_samples/my_voice.wav"
 ```
 
-- opus-mt:
+这意味着：
+- Qwen 是主路由
+- XTTS 是本地兜底
+
+## Create Qwen Voice
+
+如果要使用 Qwen TTS VC，需要先创建 voice。
+
+项目里已经提供脚本：
+
+[`create_qwen_voice.py`](/C:/Users/30909/Desktop/document/files/create_qwen_voice.py)
+
+运行：
 
 ```powershell
-pip install sentencepiece sacremoses
+python create_qwen_voice.py
 ```
 
-## Start Order
+默认会读取：
+- `DASHSCOPE_API_KEY`
+- `QWEN_TTS_MODEL`
+- `voice_samples/my_voice.wav`
 
-推荐按这个顺序启动。
+成功后会打印：
 
-### Terminal 1: translation API
-
-```powershell
-uvicorn api:app --host 127.0.0.1 --port 8000
+```text
+QWEN_TTS_VOICE=qwen-tts-vc-...
 ```
 
-### Terminal 2: main pipeline
+把这行填回 [`.env`](/C:/Users/30909/Desktop/document/files/.env) 即可。
+
+## Run
+
+启动主流程：
 
 ```powershell
 python orchestrator.py
 ```
 
-如果你只想单独测试 TTS，也可以直接运行：
+启动后你会看到：
 
-```powershell
-python main.py
+```text
+ASR -> MT -> TTS pipeline starting...
+System ready - start speaking!
 ```
 
-不过当前主流程默认是直接从 `orchestrator.py` 调用 `main.py` 的 `speak()`，不依赖 Redis 才能播报。
+然后直接对麦克风说话即可。
 
-## Voice Cloning
+## Important Logs
 
-如果你想让 TTS 尽量接近你的声音，先录一段干净的参考音频：
+当前日志里最值得关注的是这些：
+
+### 启动时
+
+- `[MT model ] provider=deepseek | model=...`
+- `[ASR model] provider=sherpa-onnx | model_path=...`
+- `[VAD model] repo=snakers4/silero-vad | model=silero_vad ...`
+- `[TTS] INFO    TTS primary model | provider=qwen_api | model=...`
+- `[TTS] INFO    TTS fallback model | provider=xtts | model=xtts_v2 | device=...`
+- `[TTS] INFO    TTS startup | primary=qwen_api | fallback=xtts`
+
+### 每句播报时
+
+- `[ASR final  ]: ...`
+- `[MT  ]: ...`
+- `[TTS] INFO    TTS provider | provider=qwen_api | model=...`
+
+如果 Qwen 失败回退，你会看到：
+
+```text
+Qwen TTS API failed, falling back to local backend.
+TTS provider | provider=xtts | mode=...
+```
+
+## Record Voice Sample
+
+如果你想替换默认参考音频，可以运行：
 
 ```powershell
 python record_voice.py
@@ -164,142 +215,56 @@ voice_samples/my_voice.wav
 ```
 
 建议参考音频：
-
-- 10 到 30 秒
+- 10 到 20 秒
 - 单人说话
-- 环境安静
-- 不要有背景音乐、回声、削波
-- 尽量和目标输出语言一致
-
-注意：
-
-- XTTS 是 zero-shot voice cloning，不是 100% 完全复制
-- 它更像是在模仿参考音频里的说话人特征
-- 如果你用男声录一个女声参考，输出通常也会更接近那段女声
-
-## Key Configuration
-
-### TTS
-
-在 [`main.py`](/C:/Users/30909/Desktop/document/files/main.py) 中：
-
-```python
-TTS_BACKEND = "xtts"
-VOICE_SAMPLE = "voice_samples/my_voice.wav"
-PROXY = None
-```
-
-XTTS 相关参数：
-
-```python
-XTTS_TEMPERATURE = 1.0
-XTTS_SPEED = 1.0
-XTTS_REPETITION_PENALTY = 10.0
-XTTS_LENGTH_PENALTY = 1.0
-XTTS_TOP_K = 50
-XTTS_TOP_P = 0.85
-XTTS_STREAMING_MODE = "auto"
-```
-
-含义简述：
-
-- `VOICE_SAMPLE`: 最影响音色像不像
-- `XTTS_SPEED`: 影响语速，也会影响主观听感
-- `XTTS_TEMPERATURE`: 影响自然度和随机性
-- `XTTS_STREAMING_MODE`:
-  - `"auto"`: GPU 时优先流式，CPU 时优先整句播放
-  - `"on"`: 强制流式
-  - `"off"`: 强制非流式
-
-### MT
-
-在 [`translator.py`](/C:/Users/30909/Desktop/document/files/translator.py) 中：
-
-```python
-USE_OPUS_MT = True
-```
-
-- `True`: 更适合 CPU，速度快
-- `False`: 切到 Qwen，本地泛化能力更强，但通常更慢
-
-### Pipeline
-
-在 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 中：
-
-```python
-MT_SOURCE_LANG = "zh"
-MT_TARGET_LANG = "en"
-VAD_THRESHOLD = 0.40
-MAX_SILENCE_FRAMES = 30
-```
-
-## Typical Logs
-
-启动后你通常会看到类似日志：
-
-```text
-[TTS] INFO  TTS config | backend=xtts | voice_sample=voice_samples/my_voice.wav
-[ASR choice] tokens=... | encoder=... | decoder=... | joiner=...
-[MT request] url=http://127.0.0.1:8000/translate | source=zh | target=en
-[TTS dispatch] queued | lang=en | queue_size=1 | text=...
-[TTS worker] dequeued | lang=en | pending_after_get=0 | text=...
-```
-
-这些日志可以帮助你确认：
-
-- 当前用的是哪个 TTS backend
-- 当前用的是哪个 ASR 模型
-- MT 请求发往哪里
-- TTS 是不是正在排队播放
+- 安静环境
+- 无背景音乐和混响
+- 发音自然
 
 ## Notes
 
-- 当前 TTS 队列是串行的，所以后一条播报会等待前一条播完
-- 在 CPU 上，XTTS 通常会优先使用整句合成后播放，声音更连贯
-- 如果你觉得“音色不像”，不一定是模型用错，更常见是参考音频质量、跨语言输出、或者 zero-shot cloning 本身的上限
-- `clients/` 目录目前不是主流程核心
+- 当前 TTS 队列是串行播放，避免互相打断
+- Qwen TTS 是远程 API，XTTS 是本地回退
+- 当前 MT 是远程 DeepSeek，不再走本地 `api.py`
+- `api.py` 和 `translator.py` 目前属于历史保留模块，不是主流程核心
 
 ## Troubleshooting
 
-### No translation response
+### 1. Qwen TTS 没有生效
 
-确认翻译服务是否已经启动：
+检查：
+- `USE_QWEN_TTS_API=true`
+- `DASHSCOPE_API_KEY` 是否存在
+- `QWEN_TTS_VOICE` 是否存在
+- `QWEN_TTS_MODEL` 是否和创建 voice 时的 `target_model` 一致
 
-```powershell
-uvicorn api:app --host 127.0.0.1 --port 8000
+### 2. Qwen TTS 超时
+
+常见原因：
+- 网络不稳定
+- 挂代理导致请求异常
+
+建议：
+- 尽量直连
+- 不要挂梯子
+
+### 3. TTS 回退到 XTTS
+
+如果日志里出现：
+
+```text
+Qwen TTS API failed, falling back to local backend.
 ```
 
-### Voice not similar enough
+说明远程 Qwen 没成功，本地 XTTS 开始接管。
 
-优先检查：
+### 4. ASR 效果一般
 
-- `voice_samples/my_voice.wav` 是否真的是你想要模仿的声音
-- 参考音频是否足够干净
-- 是否存在“中文参考，英文输出”的跨语言情况
+当前 ASR 是本地轻量方案，后续可以考虑升级到更强的流式中文 ASR。
 
-### TTS sounds choppy
+## License / Notes
 
-如果是 CPU：
-
-- 保持 `XTTS_STREAMING_MODE = "auto"` 或 `"off"`
-- 不要强制流式
-
-### Wrong audio device
-
-可以先用：
-
-```powershell
-python record_voice.py --list-devices
-```
-
-查看可用输入设备。
-
-## Next Ideas
-
-后续如果继续优化，这几个方向最值得做：
-
-- 增加自动化 TTS 质量评分
-- 为 TTS 增加更明确的 speaker embedding 成功日志
-- 增加配置文件而不是直接改 Python 常量
-- 给前端或桌面界面做一个简单控制面板
-![img.png](img.png)
+请自行确认：
+- 参考音频的使用权限
+- API Key 的安全保管
+- 上传到 GitHub 时不要提交 `.env`、`models/`、`voice_samples/`

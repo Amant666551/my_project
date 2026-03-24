@@ -34,8 +34,8 @@ Four optimizations applied over previous version
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
-import logging
 import os
 import platform
 import queue
@@ -59,14 +59,26 @@ warnings.filterwarnings(
 import numpy as np
 import redis
 import torch
+from dotenv import load_dotenv
 
 # =============================================================================
 # USER CONFIGURATION
 # =============================================================================
 
+load_dotenv()
+
 TTS_BACKEND = "xtts"                          # "xtts" | "openvoice" | "edge"
 VOICE_SAMPLE = "voice_samples/my_voice.wav"   # reference clip for cloning
 PROXY = None                                  # e.g. "http://127.0.0.1:7890"
+USE_QWEN_TTS_API = os.getenv("USE_QWEN_TTS_API", "false").lower() == "true"
+
+QWEN_TTS_MODEL = os.getenv("QWEN_TTS_MODEL", "qwen3-tts-vc-2026-01-22")
+QWEN_TTS_VOICE = os.getenv("QWEN_TTS_VOICE", "").strip()
+QWEN_TTS_BASE_HTTP_API_URL = os.getenv(
+    "QWEN_TTS_BASE_HTTP_API_URL",
+    "https://dashscope.aliyuncs.com/api/v1",
+).rstrip("/")
+DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "").strip()
 
 # XTTS generation tuning (only used when TTS_BACKEND = "xtts")
 XTTS_TEMPERATURE = 1.00
@@ -93,42 +105,33 @@ RETRY_DELAY = 1.0
 
 # =============================================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [TTS] %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
-    stream=sys.stdout,
-)
-log = logging.getLogger("tts")
+class _PrintLogger:
+    @staticmethod
+    def _emit(level: str, message: str, *args) -> None:
+        if args:
+            try:
+                message = message % args
+            except Exception:
+                message = f"{message} {' '.join(map(str, args))}"
+        timestamp = time.strftime("%H:%M:%S")
+        print(f"{timestamp} [TTS] {level:<7} {message}")
+
+    def info(self, message: str, *args) -> None:
+        self._emit("INFO", message, *args)
+
+    def warning(self, message: str, *args) -> None:
+        self._emit("WARNING", message, *args)
+
+    def error(self, message: str, *args) -> None:
+        self._emit("ERROR", message, *args)
+
+
+log = _PrintLogger()
 
 _cpu_count = os.cpu_count() or 4
 torch.set_num_threads(_cpu_count)
 if hasattr(torch, "set_float32_matmul_precision"):
     torch.set_float32_matmul_precision("high")
-log.info("Torch threads: %d", _cpu_count)
-log.info(
-    "TTS config | backend=%s | voice_sample=%s | proxy=%s",
-    TTS_BACKEND,
-    VOICE_SAMPLE,
-    PROXY,
-)
-if TTS_BACKEND == "xtts":
-    log.info(
-        "XTTS tuning | temperature=%.2f | speed=%.2f | repetition_penalty=%.2f | "
-        "length_penalty=%.2f | top_k=%d | top_p=%.2f | stream_chunk_size=%d",
-        XTTS_TEMPERATURE,
-        XTTS_SPEED,
-        XTTS_REPETITION_PENALTY,
-        XTTS_LENGTH_PENALTY,
-        XTTS_TOP_K,
-        XTTS_TOP_P,
-        XTTS_STREAM_CHUNK_SIZE,
-    )
-    log.info(
-        "XTTS streaming config | mode=%s | preroll_chunks=%d",
-        XTTS_STREAMING_MODE,
-        XTTS_STREAM_PREROLL_CHUNKS,
-    )
 
 _loop = asyncio.new_event_loop()
 threading.Thread(target=_loop.run_forever, daemon=True, name="tts-loop").start()
@@ -170,7 +173,6 @@ def _patch_torch_isin() -> None:
 
     _safe_isin._codex_safe_isin = True
     torch.isin = _safe_isin
-    log.info("torch.isin compatibility patch applied.")
 
 
 def _patch_xtts_stream_modules() -> None:
@@ -185,14 +187,12 @@ def _patch_xtts_stream_modules() -> None:
         module_torch = getattr(module, "torch", None)
         if module_torch is not None:
             module_torch.isin = torch.isin
-            log.info("Patched %s.torch.isin", module_name)
 
 
 _patch_torch_isin()
 
 
 def _resolve_model_paths(manager, model_name: str) -> tuple[str, str]:
-    log.info("Resolving model assets for %s", model_name)
     result = manager.download_model(model_name)
 
     model_path = None
@@ -213,7 +213,6 @@ def _resolve_model_paths(manager, model_name: str) -> tuple[str, str]:
 
     model_path = str(model_path)
     if config_path and Path(config_path).exists():
-        log.info("Model assets resolved | model_path=%s | config_path=%s", model_path, config_path)
         return model_path, str(config_path)
 
     candidate_paths = [
@@ -223,12 +222,10 @@ def _resolve_model_paths(manager, model_name: str) -> tuple[str, str]:
 
     for candidate in candidate_paths:
         if candidate.exists():
-            log.info("Model assets resolved via fallback | model_path=%s | config_path=%s", model_path, candidate)
             return model_path, str(candidate)
 
     found = list(Path(model_path).rglob("config.json"))
     if found:
-        log.info("Model assets resolved via recursive search | model_path=%s | config_path=%s", model_path, found[0])
         return model_path, str(found[0])
 
     raise FileNotFoundError(
@@ -244,7 +241,6 @@ class _XTTSBackend:
     SAMPLE_RATE = 24_000
 
     def __init__(self):
-        log.info("Loading XTTS-v2 model ...")
         try:
             from TTS.tts.configs.xtts_config import XttsConfig
             from TTS.tts.models.xtts import Xtts
@@ -261,7 +257,6 @@ class _XTTSBackend:
             manager,
             "tts_models/multilingual/multi-dataset/xtts_v2",
         )
-        log.info("XTTS choice | model_path=%s | config_path=%s", model_path, config_path)
 
         config = XttsConfig()
         config.load_json(config_path)
@@ -271,7 +266,7 @@ class _XTTSBackend:
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._model.to(self._device)
-        log.info("XTTS-v2 loaded on device: %s", self._device)
+        log.info("TTS fallback model | provider=xtts | model=xtts_v2 | device=%s", self._device)
 
         self._gpt_cond_latent = None
         self._speaker_embedding = None
@@ -293,26 +288,17 @@ class _XTTSBackend:
                 VOICE_SAMPLE,
             )
             return None
-        log.info(
-            "Voice reference selected: %s (%.1f KB)",
-            path,
-            path.stat().st_size / 1024,
-        )
         return str(path)
 
     def _cache_speaker_embedding(self) -> None:
         if not self._reference:
-            log.info("XTTS speaker conditioning choice: built-in default voice")
             return
-
-        log.info("Computing speaker embedding once from %s ...", self._reference)
         with torch.inference_mode():
             gpt_cond_latent, speaker_embedding = self._model.get_conditioning_latents(
                 audio_path=[self._reference]
             )
         self._gpt_cond_latent = gpt_cond_latent
         self._speaker_embedding = speaker_embedding
-        log.info("Speaker embedding cached.")
 
     def _xtts_lang(self, lang: str) -> str:
         lang_map = {
@@ -328,20 +314,9 @@ class _XTTSBackend:
 
     def synthesize_streaming(self, text: str, lang: str) -> bool:
         if not self._should_stream():
-            log.info(
-                "XTTS streaming disabled for current runtime | mode=%s | device=%s",
-                XTTS_STREAMING_MODE,
-                self._device,
-            )
             return False
-        log.info(
-            "XTTS synthesis mode selected: streaming | input_lang=%s | xtts_lang=%s",
-            lang,
-            self._xtts_lang(lang),
-        )
         try:
             self._stream_to_speaker(text, lang)
-            log.info("XTTS streaming completed successfully.")
             return True
         except Exception as exc:
             log.warning("Streaming XTTS failed, falling back to file mode: %s", exc)
@@ -351,7 +326,6 @@ class _XTTSBackend:
         if self._gpt_cond_latent is None or self._speaker_embedding is None:
             raise RuntimeError("No cached speaker embedding available")
 
-        log.info("Opening sounddevice output stream for XTTS streaming.")
         import sounddevice as sd
 
         xtts_lang = self._xtts_lang(lang)
@@ -376,7 +350,6 @@ class _XTTSBackend:
 
         player_thread = threading.Thread(target=_player, daemon=True, name="xtts-player")
         player_thread.start()
-        log.info("XTTS playback thread started.")
 
         try:
             with torch.inference_mode():
@@ -403,11 +376,6 @@ class _XTTSBackend:
                         and buffered_chunks >= XTTS_STREAM_PREROLL_CHUNKS
                     ):
                         playback_started.set()
-                    if index == 0:
-                        log.info(
-                            "First audio chunk ready in %.2f s",
-                            time.perf_counter() - start_time,
-                        )
                     chunk_count += 1
                 if not playback_started.is_set():
                     playback_started.set()
@@ -415,20 +383,10 @@ class _XTTSBackend:
             audio_q.put(None)
             player_thread.join()
 
-        log.info(
-            "Streaming done: %d chunks, total %.2f s",
-            chunk_count,
-            time.perf_counter() - start_time,
-        )
+        _ = (chunk_count, start_time)
 
     def synthesize_to_file(self, text: str, lang: str, output_path: str) -> bool:
         xtts_lang = self._xtts_lang(lang)
-        log.info(
-            "XTTS synthesis mode selected: file_fallback | input_lang=%s | xtts_lang=%s | output=%s",
-            lang,
-            xtts_lang,
-            output_path,
-        )
         try:
             if self._gpt_cond_latent is not None and self._speaker_embedding is not None:
                 with torch.inference_mode():
@@ -464,7 +422,6 @@ class _XTTSBackend:
                 wav_file.setsampwidth(2)
                 wav_file.setframerate(self.SAMPLE_RATE)
                 wav_file.writeframes(audio_int16.tobytes())
-            log.info("XTTS file fallback synthesis finished.")
             return True
         except Exception as exc:
             log.error("XTTS file synthesis failed: %s", exc)
@@ -477,7 +434,6 @@ class _XTTSBackend:
 
 class _OpenVoiceBackend:
     def __init__(self):
-        log.info("Loading OpenVoice v2 ...")
         try:
             from openvoice import se_extractor
             from openvoice.api import ToneColorConverter
@@ -500,19 +456,13 @@ class _OpenVoiceBackend:
         self._converter = ToneColorConverter(ckpt_dir, device=self._device)
         self._converter.load_ckpt(os.path.join(ckpt_dir, "checkpoint.pth"))
         self._reference_se = self._load_reference_se()
-        log.info(
-            "OpenVoice choice | device=%s | checkpoints=%s | reference=%s",
-            self._device,
-            ckpt_dir,
-            VOICE_SAMPLE,
-        )
+        log.info("TTS fallback model | provider=openvoice | device=%s", self._device)
 
     def _load_reference_se(self):
         path = Path(VOICE_SAMPLE)
         if not path.exists():
             log.warning("Voice sample not found. Tone cloning disabled.")
             return None
-        log.info("OpenVoice reference selected: %s", path)
         se, _ = self._se_extractor.get_se(str(path), self._converter.model, vad=True)
         return se
 
@@ -564,12 +514,6 @@ class _OpenVoiceBackend:
 
 class _EdgeTTSBackend:
     def synthesize_sync(self, text: str, lang: str, output_path: str) -> bool:
-        log.info(
-            "Edge TTS choice | input_lang=%s | voice=%s | output=%s",
-            lang,
-            EDGE_VOICE_MAP.get(lang, "en-US-AriaNeural"),
-            output_path,
-        )
         future = asyncio.run_coroutine_threadsafe(
             self._generate(text, lang, output_path),
             _loop,
@@ -598,12 +542,117 @@ class _EdgeTTSBackend:
         return False
 
 
+class _QwenTTSAPIBackend:
+    def __init__(self):
+        if not DASHSCOPE_API_KEY:
+            raise ValueError(
+                "USE_QWEN_TTS_API is enabled but DASHSCOPE_API_KEY is not configured."
+            )
+        if not QWEN_TTS_VOICE:
+            raise ValueError(
+                "USE_QWEN_TTS_API is enabled but QWEN_TTS_VOICE is not configured."
+            )
+        try:
+            import dashscope
+        except ImportError:
+            raise ImportError("Run: pip install dashscope")
+
+        self._dashscope = dashscope
+        self._dashscope.api_key = DASHSCOPE_API_KEY
+        self._dashscope.base_http_api_url = QWEN_TTS_BASE_HTTP_API_URL
+        self._model = QWEN_TTS_MODEL
+        self._voice = QWEN_TTS_VOICE
+        log.info(
+            "TTS primary model | provider=qwen_api | model=%s | voice_configured=%s",
+            self._model,
+            bool(self._voice),
+        )
+
+    def synthesize(self, text: str, lang: str, output_path: str) -> bool:
+        try:
+            response = self._dashscope.MultiModalConversation.call(
+                model=self._model,
+                api_key=DASHSCOPE_API_KEY,
+                text=text,
+                voice=self._voice,
+                stream=False,
+            )
+
+            audio_data, audio_url = self._extract_audio_payload(response)
+            if audio_data:
+                with open(output_path, "wb") as f:
+                    f.write(audio_data)
+            elif audio_url:
+                import requests
+
+                audio_resp = requests.get(audio_url, timeout=30)
+                audio_resp.raise_for_status()
+                with open(output_path, "wb") as f:
+                    f.write(audio_resp.content)
+            else:
+                raise ValueError(
+                    "Qwen TTS response did not contain audio data or an audio URL."
+                )
+
+            size = Path(output_path).stat().st_size if Path(output_path).exists() else 0
+            if size < 100:
+                raise ValueError(f"Downloaded Qwen audio is too small: {size} bytes")
+            return True
+        except Exception as exc:
+            log.error("Qwen TTS synthesis failed: %s", exc)
+            return False
+
+    def _extract_audio_payload(self, response) -> tuple[Optional[bytes], Optional[str]]:
+        audio_candidates = []
+
+        def _get_mapping_value(obj, key):
+            if obj is None:
+                return None
+            if isinstance(obj, dict):
+                return obj.get(key)
+            try:
+                return obj[key]
+            except Exception:
+                return None
+
+        output = _get_mapping_value(response, "output")
+        if output is not None:
+            audio_candidates.append(_get_mapping_value(output, "audio"))
+
+        if isinstance(response, dict):
+            audio_candidates.append(response.get("output", {}).get("audio"))
+
+        for audio in audio_candidates:
+            if not audio:
+                continue
+            if isinstance(audio, dict):
+                if audio.get("data"):
+                    try:
+                        return base64.b64decode(audio["data"]), None
+                    except Exception:
+                        pass
+                if audio.get("url"):
+                    return None, audio["url"]
+            audio_data = _get_mapping_value(audio, "data")
+            if audio_data:
+                try:
+                    return base64.b64decode(audio_data), None
+                except Exception:
+                    pass
+            audio_url = _get_mapping_value(audio, "url")
+            if audio_url:
+                return None, audio_url
+            if isinstance(audio, str):
+                return None, audio
+
+        return None, None
+
+
 # =============================================================================
 # Backend loader
 # =============================================================================
 
 def _load_backend():
-    log.info("Selecting backend implementation for '%s'", TTS_BACKEND)
     if TTS_BACKEND == "xtts":
         return _XTTSBackend()
     if TTS_BACKEND == "openvoice":
@@ -613,8 +662,22 @@ def _load_backend():
     raise ValueError(f"Unknown TTS_BACKEND '{TTS_BACKEND}'.")
 
 
-log.info("Initialising backend: %s", TTS_BACKEND)
 _backend = _load_backend()
+_qwen_tts_backend = None
+if USE_QWEN_TTS_API:
+    try:
+        _qwen_tts_backend = _QwenTTSAPIBackend()
+    except Exception as exc:
+        log.warning(
+            "Qwen TTS API backend disabled at startup, local backend will be used instead: %s",
+            exc,
+        )
+
+log.info(
+    "TTS startup | primary=%s | fallback=%s",
+    "qwen_api" if USE_QWEN_TTS_API and _qwen_tts_backend is not None else TTS_BACKEND,
+    TTS_BACKEND if USE_QWEN_TTS_API else "none",
+)
 
 
 # =============================================================================
@@ -660,20 +723,39 @@ def speak(text: str, lang: str = "en") -> None:
     if not text or not text.strip():
         return
 
-    log.info("[%s] lang=%s | %s", TTS_BACKEND, lang, text[:60])
-
     try:
+        if USE_QWEN_TTS_API and _qwen_tts_backend is not None:
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            path = tmp.name
+            tmp.close()
+            try:
+                ok = _qwen_tts_backend.synthesize(text, lang, path)
+                if not ok:
+                    log.warning("Qwen TTS API failed, falling back to local backend.")
+                else:
+                    size = Path(path).stat().st_size if Path(path).exists() else 0
+                    if size < 100:
+                        log.error("Qwen TTS output too small (%d B).", size)
+                    else:
+                        log.info("TTS provider | provider=qwen_api | model=%s", QWEN_TTS_MODEL)
+                        _play_file(path)
+                        return
+            finally:
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+
         if TTS_BACKEND == "xtts":
-            log.info("Entering XTTS speak path.")
             if _backend.synthesize_streaming(text, lang):
-                log.info("Leaving speak() after XTTS streaming success.")
+                log.info("TTS provider | provider=xtts | mode=streaming")
                 return
 
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             path = tmp.name
             tmp.close()
             try:
-                log.info("XTTS streaming unavailable, using file fallback.")
                 ok = _backend.synthesize_to_file(text, lang, path)
                 if not ok:
                     log.error("XTTS fallback synthesis failed - skipping.")
@@ -682,9 +764,8 @@ def speak(text: str, lang: str = "en") -> None:
                 if size < 100:
                     log.error("XTTS fallback output too small (%d B).", size)
                     return
-                log.info("%.1f KB - playing XTTS fallback audio ...", size / 1024)
+                log.info("TTS provider | provider=xtts | mode=file")
                 _play_file(path)
-                log.info("XTTS fallback playback complete.")
                 return
             finally:
                 try:
@@ -713,7 +794,7 @@ def speak(text: str, lang: str = "en") -> None:
                 log.error("Output too small (%d B).", size)
                 return
 
-            log.info("%.1f KB - playing ...", size / 1024)
+            log.info("TTS provider | provider=%s", TTS_BACKEND)
             _play_file(path)
         finally:
             try:
@@ -744,7 +825,7 @@ def run_as_service() -> None:
     )
     pubsub = redis_client.pubsub()
     pubsub.subscribe(INPUT_CHANNEL)
-    log.info("Service ready (backend=%s, channel=%s)", TTS_BACKEND, INPUT_CHANNEL)
+    log.info("TTS service ready | primary=%s", "qwen_api" if USE_QWEN_TTS_API and _qwen_tts_backend is not None else TTS_BACKEND)
 
     pending: list[tuple[str, str]] = []
     try:
@@ -762,7 +843,7 @@ def run_as_service() -> None:
                 if text:
                     pending.append((text, lang))
                     if len(pending) > MAX_QUEUE:
-                        log.warning("Queue full - dropped: %s", pending.pop(0)[0][:40])
+                        pending.pop(0)
 
             if pending:
                 speak(*pending.pop(0))

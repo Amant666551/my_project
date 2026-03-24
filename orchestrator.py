@@ -77,15 +77,9 @@ class StreamingASR:
         decoder_path = os.path.join(MODEL_PATH, "decoder-epoch-99-avg-1.onnx")
         joiner_path = os.path.join(MODEL_PATH, "joiner-epoch-99-avg-1.int8.onnx")
 
-        print(f"Loading ASR model from: {MODEL_PATH}")
         print(
-            "[ASR choice] "
-            f"tokens={tokens_path} | encoder={encoder_path} | "
-            f"decoder={decoder_path} | joiner={joiner_path}"
-        )
-        print(
-            "[ASR config] "
-            f"sample_rate={SAMPLE_RATE} | feature_dim=80 | num_threads=4 | "
+            "[ASR model] "
+            f"provider=sherpa-onnx | model_path={MODEL_PATH} | "
             "decoding_method=greedy_search"
         )
         self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
@@ -100,13 +94,10 @@ class StreamingASR:
         )
         self.stream = self.recognizer.create_stream()
 
-        print("Initialising RNNoise ...")
         self.rnnoise = RNNoise(sample_rate=SAMPLE_RATE)
-        print(f"[RNNoise choice] sample_rate={SAMPLE_RATE}")
 
-        print("Loading Silero VAD ...")
         print(
-            "[VAD choice] "
+            "[VAD model] "
             "repo=snakers4/silero-vad | model=silero_vad | "
             f"threshold={VAD_THRESHOLD} | max_silence_frames={MAX_SILENCE_FRAMES}"
         )
@@ -155,7 +146,6 @@ class StreamingASR:
 
         current = self.recognizer.get_result(self.stream).strip()
         if current and current != self.last_text:
-            print(f"\r[ASR partial]: {current}   ", end="", flush=True)
             self.last_text = current
 
         if self.last_text and self.silence_frames >= MAX_SILENCE_FRAMES:
@@ -167,7 +157,7 @@ class StreamingASR:
         return ""
 
 ###这部分是用本地模型
-"""""
+"""
 def translate(text: str) -> str | None:
     try:
         print(
@@ -195,9 +185,9 @@ def translate(text: str) -> str | None:
     except Exception as exc:
         print(f"[MT] Error: {exc}")
         return None
-"""""
+"""
 ###这是Qwen的api
-""""
+"""
 def translate(text: str) -> str | None:
     try:
         response = Generation.call(
@@ -274,26 +264,20 @@ _tts_q: queue.Queue[tuple[str, str]] = queue.Queue()
 
 def _audio_callback(indata, frames, time_info, status):
     if status:
-        print(status, file=sys.stderr)
+        print(f"[Audio] {status}", file=sys.stderr)
     _audio_q.put(indata[:, 0].copy())
 
 
 def _run_tts(text: str, lang: str) -> None:
-    print(f"[TTS thread] starting | lang={lang} | text={text[:60]}")
     try:
         tts_speak(text, lang=lang)
-        print("[TTS thread] finished")
     except Exception as exc:
         print(f"[TTS thread] crashed: {exc}")
 
 
 def _tts_worker() -> None:
-    print("[TTS worker] ready | mode=serial_queue")
     while True:
         text, lang = _tts_q.get()
-        print(
-            f"[TTS worker] dequeued | lang={lang} | pending_after_get={_tts_q.qsize()} | text={text[:60]}"
-        )
         try:
             _run_tts(text, lang)
         finally:
@@ -307,6 +291,7 @@ def main():
         f"audio_sample_rate={SAMPLE_RATE} | frame_size={FRAME_SIZE} | channels={CHANNELS} | "
         f"mt_target_lang={MT_TARGET_LANG}"
     )
+    print(f"[MT model ] provider=deepseek | model={DEEPSEEK_MODEL}")
 
     asr = StreamingASR()
     threading.Thread(target=_tts_worker, daemon=True, name="tts-worker").start()
@@ -331,11 +316,7 @@ def main():
                 if not translation:
                     continue
 
-                # Queue TTS requests so playback stays serial and does not interrupt itself.
                 _tts_q.put((translation, MT_TARGET_LANG))
-                print(
-                    f"[TTS dispatch] queued | lang={MT_TARGET_LANG} | queue_size={_tts_q.qsize()} | text={translation[:60]}"
-                )
 
     except KeyboardInterrupt:
         print("\nPipeline stopped.")
