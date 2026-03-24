@@ -25,7 +25,19 @@ from pyrnnoise import RNNoise
 
 from main import speak as tts_speak
 
+###Deepseek
+from dotenv import load_dotenv
+load_dotenv()
 
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+if not DEEPSEEK_API_KEY:
+    raise ValueError("DEEPSEEK_API_KEY is not set in .env")
+
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+
+###Qwen
+"""
 from dotenv import load_dotenv
 import dashscope
 from dashscope import Generation
@@ -38,6 +50,9 @@ if not api_key:
     raise ValueError("DASHSCOPE_API_KEY is not set in .env")
 
 dashscope.api_key = api_key
+"""
+
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "models", "zipformer")
@@ -181,7 +196,8 @@ def translate(text: str) -> str | None:
         print(f"[MT] Error: {exc}")
         return None
 """""
-
+###这是Qwen的api
+""""
 def translate(text: str) -> str | None:
     try:
         response = Generation.call(
@@ -204,8 +220,52 @@ def translate(text: str) -> str | None:
     except Exception as e:
         print(f"[MT] Exception: {e}")
         return None
+"""
 
+###这是Deepseek的api
+def translate(text: str) -> str | None:
+    try:
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json",
+        }
 
+        payload = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a professional interpreter. Translate Chinese to English. Output only the translation."
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ],
+            "temperature": 0.3,
+        }
+
+        resp = requests.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=MT_TIMEOUT_SEC,
+        )
+        resp.raise_for_status()
+
+        data = resp.json()
+        result = data["choices"][0]["message"]["content"].strip()
+
+        if result:
+            print(f"[MT  ]: {result}")
+        return result or None
+
+    except requests.exceptions.Timeout:
+        print("[MT] Timed out - skipping utterance.")
+        return None
+    except Exception as exc:
+        print(f"[MT] Exception: {exc}")
+        return None
 
 
 _audio_q: queue.Queue[np.ndarray] = queue.Queue()
