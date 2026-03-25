@@ -36,8 +36,8 @@ files/
 - main.py                  # TTS 后端与播放逻辑
 - api.py                   # 前端服务 + 本地翻译接口 + orchestrator 控制接口
 - translator.py            # 本地翻译模型封装
-- create_qwen_voice.py     # 创建 Qwen TTS voice
-- record_voice.py          # 录制参考音频
+- create_qwen_voice.py     # 兼容入口，推荐改用 record_voice.py
+- record_voice.py          # 录音 + 创建 voice + 管理 voice
 - web/
   - index.html             # 前端页面
   - styles.css             # 前端样式
@@ -353,29 +353,53 @@ XTTS 参数：
 - `QWEN_TTS_MODEL`
 - `QWEN_TTS_VOICE`
 
-## 创建 Qwen TTS Voice
+## 录音、创建 Voice、切换 Voice
 
-如果要使用 Qwen TTS VC，需要先创建 `voice`。
+现在推荐统一使用：
 
-运行：
+[`record_voice.py`](/C:/Users/30909/Desktop/document/files/record_voice.py)
+
+### 1. 一步完成录音 + 创建 voice + 激活
+
+直接运行：
 
 ```powershell
-python create_qwen_voice.py
+python record_voice.py
 ```
 
-它会读取：
+它会自动完成：
 
-- `DASHSCOPE_API_KEY`
-- `QWEN_TTS_MODEL`
-- `voice_samples/my_voice.wav`
+- 录一段新的参考音频
+- 按顺序保存到 [`voice_samples`](/C:/Users/30909/Desktop/document/files/voice_samples)
+  目录，例如：
+  - `voice_001.wav`
+  - `voice_002.wav`
+- 调用 Qwen voice 创建接口
+- 把结果记录到：
+  [`voice_samples/voice_registry.json`](/C:/Users/30909/Desktop/document/files/voice_samples/voice_registry.json)
+- 自动更新 [`.env`](/C:/Users/30909/Desktop/document/files/.env) 中的：
+  - `QWEN_TTS_VOICE`
+  - `QWEN_TTS_VOICE_SAMPLE`
+  - `VOICE_SAMPLE`
 
-成功后会输出：
+### 2. 查看已有 voice
 
-```text
-QWEN_TTS_VOICE=qwen-tts-vc-...
+```powershell
+python record_voice.py --list
 ```
 
-把它填回 [`.env`](/C:/Users/30909/Desktop/document/files/.env) 即可。
+### 3. 手动切换当前使用的 voice
+
+```powershell
+python record_voice.py --activate 2
+```
+
+这会把第 2 个已保存 voice 激活，并同步更新 [`.env`](/C:/Users/30909/Desktop/document/files/.env)。
+
+### 4. 兼容旧脚本
+
+[`create_qwen_voice.py`](/C:/Users/30909/Desktop/document/files/create_qwen_voice.py) 仍然保留，但现在只是兼容入口。  
+后续更推荐直接使用 [`record_voice.py`](/C:/Users/30909/Desktop/document/files/record_voice.py)。
 
 ## 重要日志怎么看
 

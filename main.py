@@ -68,7 +68,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TTS_BACKEND = "xtts"                          # "xtts" | "openvoice" | "edge"
-VOICE_SAMPLE = "voice_samples/my_voice.wav"   # reference clip for cloning
+VOICE_SAMPLE = os.getenv(
+    "VOICE_SAMPLE",
+    "voice_samples/my_voice.wav",
+)                                              # reference clip for cloning
 PROXY = None                                  # e.g. "http://127.0.0.1:7890"
 USE_QWEN_TTS_API = os.getenv("USE_QWEN_TTS_API", "false").lower() == "true"
 

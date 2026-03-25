@@ -1,152 +1,347 @@
 """
-record_voice.py  –  Voice sample recorder for TTS cloning
+record_voice.py - one-stop voice manager
 
-Records a clean reference clip of your voice and saves it to
-voice_samples/my_voice.wav, which main.py reads for voice cloning.
+Features:
+- record a new voice sample into voice_samples/voice_XXX.wav
+- create a Qwen TTS voice from that sample
+- store created voices in voice_samples/voice_registry.json
+- activate any stored voice by index
 
-Usage
------
-    python record_voice.py                  # default 20 s
-    python record_voice.py --duration 30    # record 30 s
-    python record_voice.py --output voice_samples/custom.wav
+Default usage:
+    python record_voice.py
 
-Tips for a good reference clip
---------------------------------
-- Find a quiet room — background noise degrades cloning quality significantly
-- Speak naturally at a comfortable pace; avoid rushing or whispering
-- 15–30 seconds is the sweet spot; very short clips (<6 s) reduce quality
-- Read aloud naturally, e.g. a paragraph from a book or article
-- Keep the microphone 15–30 cm from your mouth
-- Watch the level meter: aim to stay in the green/yellow range
-
-What each model needs
-----------------------
-  XTTS-v2     6 s minimum, 15-30 s recommended
-  OpenVoice   5 s minimum, 15-20 s recommended
+Other usage:
+    python record_voice.py --list
+    python record_voice.py --activate 2
+    python record_voice.py --duration 25
 """
 
+from __future__ import annotations
+
 import argparse
+import base64
+import json
 import os
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import requests
 import sounddevice as sd
 import soundfile as sf
-
-DEFAULT_DURATION   = 20        # seconds
-DEFAULT_SAMPLE_RATE = 22050    # Hz — XTTS and OpenVoice both prefer 22050
-DEFAULT_OUTPUT     = "voice_samples/my_voice.wav"
+from dotenv import load_dotenv, set_key
 
 
-def record(duration: int, output: str, sample_rate: int = DEFAULT_SAMPLE_RATE) -> None:
-    output_path = Path(output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+load_dotenv()
 
-    print(f"\n🎙️  Voice Sample Recorder")
-    print(f"   Duration   : {duration} s")
-    print(f"   Sample rate: {sample_rate} Hz")
-    print(f"   Output     : {output_path.resolve()}")
+
+BASE_DIR = Path(__file__).resolve().parent
+ENV_PATH = BASE_DIR / ".env"
+VOICE_DIR = BASE_DIR / "voice_samples"
+REGISTRY_PATH = VOICE_DIR / "voice_registry.json"
+
+DEFAULT_DURATION = 20
+DEFAULT_SAMPLE_RATE = 22050
+DEFAULT_TARGET_MODEL = os.getenv("QWEN_TTS_MODEL", "qwen3-tts-vc-2026-01-22")
+DEFAULT_PREFERRED_NAME = os.getenv("QWEN_TTS_PREFERRED_NAME", "myvoice")
+DEFAULT_CUSTOMIZATION_URL = os.getenv(
+    "QWEN_TTS_CUSTOMIZATION_URL",
+    "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/customization",
+)
+DEFAULT_REQUEST_TIMEOUT = (
+    int(os.getenv("QWEN_TTS_CONNECT_TIMEOUT", "15")),
+    int(os.getenv("QWEN_TTS_READ_TIMEOUT", "180")),
+)
+
+
+def _require_env_path() -> None:
+    if not ENV_PATH.exists():
+        raise FileNotFoundError(f".env not found: {ENV_PATH}")
+
+
+def _load_registry() -> list[dict]:
+    if not REGISTRY_PATH.exists():
+        return []
+    try:
+        return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        raise RuntimeError(f"Invalid registry JSON: {REGISTRY_PATH}")
+
+
+def _save_registry(entries: list[dict]) -> None:
+    VOICE_DIR.mkdir(parents=True, exist_ok=True)
+    REGISTRY_PATH.write_text(
+        json.dumps(entries, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _next_sample_path() -> Path:
+    VOICE_DIR.mkdir(parents=True, exist_ok=True)
+    existing = sorted(VOICE_DIR.glob("voice_*.wav"))
+    max_index = 0
+    for path in existing:
+        stem = path.stem
+        try:
+            max_index = max(max_index, int(stem.split("_")[-1]))
+        except ValueError:
+            continue
+    return VOICE_DIR / f"voice_{max_index + 1:03d}.wav"
+
+
+def _guess_mime_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".wav":
+        return "audio/wav"
+    if suffix == ".mp3":
+        return "audio/mpeg"
+    if suffix == ".m4a":
+        return "audio/mp4"
+    raise ValueError(f"Unsupported audio format: {suffix}")
+
+
+def _set_env_value(key: str, value: str) -> None:
+    _require_env_path()
+    set_key(str(ENV_PATH), key, value)
+    os.environ[key] = value
+
+
+def record_sample(
+    duration: int,
+    output: Path,
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
+) -> Path:
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    print("\nVoice Sample Recorder")
+    print(f"  Duration   : {duration}s")
+    print(f"  Sample rate: {sample_rate} Hz")
+    print(f"  Output     : {output}")
     print()
     print("Tips:")
     print("  - Speak naturally and clearly")
-    print("  - Read a paragraph aloud — variety of sounds helps cloning")
-    print("  - Keep background noise to a minimum")
+    print("  - Keep background noise low")
+    print("  - Read a paragraph aloud")
     print()
 
-    input("Press ENTER when you're ready to start recording ...")
-    print()
+    input("Press ENTER when ready...")
 
-    # Countdown
     for i in (3, 2, 1):
-        print(f"  Starting in {i} ...", end="\r", flush=True)
-        import time; time.sleep(1)
+        print(f"Starting in {i}...", end="\r", flush=True)
+        time.sleep(1)
 
-    print("  ● RECORDING — speak now!              ")
-    print()
+    print("Recording... speak now.                 ")
 
-    # Show a live level meter while recording
-    frames = []
-    block_size = 1024
+    frames: list[np.ndarray] = []
 
     def callback(indata, frame_count, time_info, status):
         frames.append(indata.copy())
-        # Simple ASCII level meter
-        level = np.abs(indata).mean()
-        bar_len = int(level * 400)
-        bar = "█" * min(bar_len, 40)
-        color = "\033[32m" if bar_len < 25 else "\033[33m" if bar_len < 38 else "\033[31m"
-        print(f"  Level: {color}{bar:<40}\033[0m", end="\r", flush=True)
+        level = float(np.abs(indata).mean())
+        bar_len = min(int(level * 400), 40)
+        bar = "#" * bar_len
+        print(f"Level: {bar:<40}", end="\r", flush=True)
 
     with sd.InputStream(
         samplerate=sample_rate,
         channels=1,
         dtype="float32",
-        blocksize=block_size,
+        blocksize=1024,
         callback=callback,
     ):
         sd.sleep(duration * 1000)
 
     print()
-    print()
-    print("  ■ Recording stopped.")
+    print("Recording stopped.")
 
-    # Concatenate and save
     audio = np.concatenate(frames, axis=0)
+    peak = float(np.abs(audio).max())
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    sf.write(str(output), audio, sample_rate)
 
-    # Warn if the recording was too quiet
-    peak = np.abs(audio).max()
-    rms  = np.sqrt(np.mean(audio ** 2))
-    if peak < 0.05:
-        print("\n⚠️  Warning: recording is very quiet (peak={:.3f}).".format(peak))
-        print("   Check your microphone and try again.")
-    elif rms < 0.01:
-        print("\n⚠️  Warning: low average volume (RMS={:.4f}).".format(rms))
-        print("   Try speaking louder or moving closer to the microphone.")
-    else:
-        print(f"   Audio stats: peak={peak:.3f}, RMS={rms:.4f}  ✅ looks good")
+    print(f"Saved sample: {output}")
+    print(f"Audio stats: peak={peak:.3f}, rms={rms:.4f}")
+    return output
 
-    sf.write(str(output_path), audio, sample_rate)
 
-    size_kb = output_path.stat().st_size / 1024
-    print(f"\n✅ Saved: {output_path.resolve()}  ({size_kb:.1f} KB, {duration} s)")
+def create_qwen_voice_from_sample(
+    audio_file: Path,
+    target_model: str = DEFAULT_TARGET_MODEL,
+    preferred_name: str = DEFAULT_PREFERRED_NAME,
+) -> str:
+    api_key = os.getenv("DASHSCOPE_API_KEY")
+    if not api_key:
+        raise ValueError("DASHSCOPE_API_KEY is not set in .env")
+    if not audio_file.exists():
+        raise FileNotFoundError(f"Audio file not found: {audio_file}")
+
+    mime_type = _guess_mime_type(audio_file)
+    base64_str = base64.b64encode(audio_file.read_bytes()).decode("utf-8")
+    data_uri = f"data:{mime_type};base64,{base64_str}"
+
+    payload = {
+        "model": "qwen-voice-enrollment",
+        "input": {
+            "action": "create",
+            "target_model": target_model,
+            "preferred_name": preferred_name,
+            "audio": {"data": data_uri},
+        },
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = requests.post(
+            DEFAULT_CUSTOMIZATION_URL,
+            json=payload,
+            headers=headers,
+            timeout=DEFAULT_REQUEST_TIMEOUT,
+        )
+    except requests.exceptions.ReadTimeout as exc:
+        raise RuntimeError(
+            "Create voice request timed out. Try again later or increase "
+            "QWEN_TTS_READ_TIMEOUT in .env."
+        ) from exc
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(f"Create voice request failed: {exc}") from exc
+
+    print("status:", response.status_code)
+    print(response.text)
+    response.raise_for_status()
+
+    try:
+        return response.json()["output"]["voice"]
+    except (KeyError, ValueError) as exc:
+        raise RuntimeError(f"Failed to parse voice from response: {exc}") from exc
+
+
+def activate_voice(entry_index: int) -> dict:
+    entries = _load_registry()
+    if not entries:
+        raise RuntimeError("Voice registry is empty.")
+    if entry_index < 1 or entry_index > len(entries):
+        raise ValueError(f"Invalid voice index: {entry_index}")
+
+    for i, entry in enumerate(entries, start=1):
+        entry["active"] = i == entry_index
+
+    chosen = entries[entry_index - 1]
+    _save_registry(entries)
+
+    _set_env_value("QWEN_TTS_VOICE", chosen["qwen_tts_voice"])
+    _set_env_value("QWEN_TTS_VOICE_SAMPLE", chosen["sample_path"])
+    _set_env_value("VOICE_SAMPLE", chosen["sample_path"])
+
+    return chosen
+
+
+def list_voices() -> None:
+    entries = _load_registry()
+    if not entries:
+        print("No saved voices yet.")
+        return
+
+    print("\nSaved voices:")
+    for i, entry in enumerate(entries, start=1):
+        marker = "*" if entry.get("active") else " "
+        print(
+            f"[{i}] {marker} voice={entry['qwen_tts_voice']} | "
+            f"sample={entry['sample_path']} | "
+            f"model={entry['target_model']} | "
+            f"created={entry['created_at']}"
+        )
     print()
-    print("Next step: open main.py and set:")
-    print(f'   VOICE_SAMPLE = "{output}"')
-    print('   TTS_BACKEND  = "xtts"   # or "openvoice"')
+
+
+def register_voice(sample_path: Path, voice_id: str, target_model: str, preferred_name: str) -> dict:
+    entries = _load_registry()
+    for entry in entries:
+        entry["active"] = False
+
+    new_entry = {
+        "sample_path": str(sample_path.relative_to(BASE_DIR)).replace("\\", "/"),
+        "qwen_tts_voice": voice_id,
+        "target_model": target_model,
+        "preferred_name": preferred_name,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "active": True,
+    }
+    entries.append(new_entry)
+    _save_registry(entries)
+
+    _set_env_value("QWEN_TTS_VOICE", voice_id)
+    _set_env_value("QWEN_TTS_VOICE_SAMPLE", new_entry["sample_path"])
+    _set_env_value("VOICE_SAMPLE", new_entry["sample_path"])
+    return new_entry
+
+
+def record_create_and_activate(duration: int, sample_rate: int) -> None:
+    target_model = os.getenv("QWEN_TTS_MODEL", DEFAULT_TARGET_MODEL)
+    preferred_name = os.getenv("QWEN_TTS_PREFERRED_NAME", DEFAULT_PREFERRED_NAME)
+    sample_path = _next_sample_path()
+
+    record_sample(duration=duration, output=sample_path, sample_rate=sample_rate)
+    voice_id = create_qwen_voice_from_sample(
+        audio_file=sample_path,
+        target_model=target_model,
+        preferred_name=preferred_name,
+    )
+    entry = register_voice(
+        sample_path=sample_path,
+        voice_id=voice_id,
+        target_model=target_model,
+        preferred_name=preferred_name,
+    )
+
     print()
-    print("Then run your pipeline normally:")
-    print("   python orchestrator.py")
+    print("Voice created and activated.")
+    print(f"Sample : {entry['sample_path']}")
+    print(f"Voice  : {entry['qwen_tts_voice']}")
+    print("Updated .env keys:")
+    print(f"  QWEN_TTS_VOICE={entry['qwen_tts_voice']}")
+    print(f"  QWEN_TTS_VOICE_SAMPLE={entry['sample_path']}")
+    print(f"  VOICE_SAMPLE={entry['sample_path']}")
     print()
 
 
-def list_devices() -> None:
-    print("\nAvailable audio input devices:")
-    print(sd.query_devices())
-    print()
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Record a voice reference clip for TTS cloning.")
-    parser.add_argument("--duration", type=int,  default=DEFAULT_DURATION,
-                        help=f"Recording duration in seconds (default: {DEFAULT_DURATION})")
-    parser.add_argument("--output",   type=str,  default=DEFAULT_OUTPUT,
-                        help=f"Output WAV path (default: {DEFAULT_OUTPUT})")
-    parser.add_argument("--rate",     type=int,  default=DEFAULT_SAMPLE_RATE,
-                        help=f"Sample rate in Hz (default: {DEFAULT_SAMPLE_RATE})")
-    parser.add_argument("--list-devices", action="store_true",
-                        help="List available microphones and exit")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Record, create, list, and switch Qwen voices.")
+    parser.add_argument("--duration", type=int, default=DEFAULT_DURATION, help="Recording duration in seconds.")
+    parser.add_argument("--rate", type=int, default=DEFAULT_SAMPLE_RATE, help="Recording sample rate in Hz.")
+    parser.add_argument("--list", action="store_true", help="List saved voices.")
+    parser.add_argument("--activate", type=int, help="Activate a saved voice by 1-based index.")
+    parser.add_argument("--list-devices", action="store_true", help="List available microphones and exit.")
     args = parser.parse_args()
 
     if args.list_devices:
-        list_devices()
-        sys.exit(0)
+        print(sd.query_devices())
+        return
 
+    if args.list:
+        list_voices()
+        return
+
+    if args.activate is not None:
+        chosen = activate_voice(args.activate)
+        print()
+        print("Activated voice:")
+        print(f"  Voice  : {chosen['qwen_tts_voice']}")
+        print(f"  Sample : {chosen['sample_path']}")
+        return
+
+    record_create_and_activate(duration=args.duration, sample_rate=args.rate)
+
+
+if __name__ == "__main__":
     try:
-        record(duration=args.duration, output=args.output, sample_rate=args.rate)
+        main()
     except KeyboardInterrupt:
-        print("\n\nRecording cancelled.")
+        print("\nOperation cancelled.")
         sys.exit(1)
     except Exception as exc:
-        print(f"\n❌ Error: {exc}")
+        print(f"\nError: {exc}")
         sys.exit(1)
