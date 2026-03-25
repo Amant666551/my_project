@@ -218,7 +218,8 @@ body {
 
 .stack-panel,
 .notes-panel,
-.config-panel {
+.config-panel,
+.voice-panel {
   min-height: 270px;
 }
 

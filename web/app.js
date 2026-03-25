@@ -31,10 +31,15 @@ const elements = {
   directionForm: document.getElementById("direction-form"),
   reloadDirection: document.getElementById("reload-direction"),
   directionStatus: document.getElementById("direction-status"),
+  voiceForm: document.getElementById("voice-form"),
+  voiceSelect: document.getElementById("voice-select"),
+  reloadVoices: document.getElementById("reload-voices"),
+  voiceStatus: document.getElementById("voice-status"),
 };
 
 let runtimeStack = null;
 let pipelinePollTimer = null;
+let voiceEntries = [];
 
 function setHealth(status, subtitle, className) {
   const value = elements.healthCard.querySelector(".status-value");
@@ -51,6 +56,11 @@ function formatFallback(value) {
 function setDirectionStatus(text, className = "") {
   elements.directionStatus.textContent = text;
   elements.directionStatus.className = className;
+}
+
+function setVoiceStatus(text, className = "") {
+  elements.voiceStatus.textContent = text;
+  elements.voiceStatus.className = className;
 }
 
 function applyStack(stack) {
@@ -79,6 +89,28 @@ function applyStack(stack) {
   elements.targetLang.value = stack.languages.translation.target_code;
   elements.runtimeSourceLang.value = stack.languages.translation.source_code;
   elements.runtimeTargetLang.value = stack.languages.translation.target_code;
+}
+
+function renderVoiceOptions(entries) {
+  voiceEntries = entries;
+  elements.voiceSelect.innerHTML = "";
+
+  if (!entries.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No saved voices";
+    elements.voiceSelect.appendChild(option);
+    return;
+  }
+
+  entries.forEach((entry, idx) => {
+    const option = document.createElement("option");
+    option.value = String(idx + 1);
+    const activeMark = entry.active ? " [active]" : "";
+    option.textContent = `#${idx + 1} ${entry.sample_path}${activeMark}`;
+    option.selected = !!entry.active;
+    elements.voiceSelect.appendChild(option);
+  });
 }
 
 function applyPipelineStatus(payload) {
@@ -141,6 +173,20 @@ async function loadPipelineStatus() {
     elements.pipelineStatusNote.textContent = "status error";
     elements.pipelineStatusNote.className = "error";
     elements.pipelineLogs.textContent = String(error);
+  }
+}
+
+async function loadVoices() {
+  try {
+    const response = await fetch("/api/voices");
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || "Failed to load voices");
+    }
+    renderVoiceOptions(data.voices || []);
+    setVoiceStatus("Voice list loaded.", "ok");
+  } catch (error) {
+    setVoiceStatus(String(error), "error");
   }
 }
 
@@ -245,6 +291,37 @@ async function saveDirection(event) {
   }
 }
 
+async function activateSelectedVoice(event) {
+  event.preventDefault();
+
+  const index = Number(elements.voiceSelect.value);
+  if (!index) {
+    setVoiceStatus("No voice selected.", "error");
+    return;
+  }
+
+  setVoiceStatus("Activating...", "loading");
+
+  try {
+    const response = await fetch("/api/voices/activate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ index }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || "Failed to activate voice");
+    }
+
+    setVoiceStatus(data.message || "Voice activated.", "ok");
+    await Promise.all([loadVoices(), loadStack()]);
+  } catch (error) {
+    setVoiceStatus(String(error), "error");
+  }
+}
+
 function applyRuntimeDirection() {
   if (!runtimeStack) {
     return;
@@ -270,7 +347,7 @@ function startPollingPipeline() {
 }
 
 async function boot() {
-  await Promise.all([loadHealth(), loadStack(), loadPipelineStatus()]);
+  await Promise.all([loadHealth(), loadStack(), loadPipelineStatus(), loadVoices()]);
 
   elements.translateForm.addEventListener("submit", submitTranslation);
   elements.useRuntimeDirection.addEventListener("click", applyRuntimeDirection);
@@ -279,6 +356,8 @@ async function boot() {
   elements.refreshPipeline.addEventListener("click", loadPipelineStatus);
   elements.directionForm.addEventListener("submit", saveDirection);
   elements.reloadDirection.addEventListener("click", reloadDirection);
+  elements.voiceForm.addEventListener("submit", activateSelectedVoice);
+  elements.reloadVoices.addEventListener("click", loadVoices);
 
   startPollingPipeline();
 }

@@ -311,9 +311,15 @@ def _translate_deepseek(text: str) -> str | None:
                 {
                     "role": "system",
                     "content": (
-                        "You are a professional interpreter. "
-                        f"Translate from {source_name} to {target_name}. "
-                        "Output only the translation."
+                        "You are a strict translation engine, not a chatbot. "
+                        f"Translate the user's text from {source_name} to {target_name}. "
+                        "Return only the translated text. "
+                        "Do not answer the user. "
+                        "Do not continue the conversation. "
+                        "Do not explain anything. "
+                        "Do not add quotation marks or notes. "
+                        "If the input is already in the target language, return it unchanged. "
+                        "If the input is a fragment, translate only that fragment."
                     ),
                 },
                 {
@@ -321,7 +327,7 @@ def _translate_deepseek(text: str) -> str | None:
                     "content": text,
                 },
             ],
-            "temperature": 0.3,
+            "temperature": 0.0,
         }
 
         resp = requests.post(

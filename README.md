@@ -396,11 +396,6 @@ python record_voice.py --activate 2
 
 这会把第 2 个已保存 voice 激活，并同步更新 [`.env`](/C:/Users/30909/Desktop/document/files/.env)。
 
-### 4. 兼容旧脚本
-
-[`create_qwen_voice.py`](/C:/Users/30909/Desktop/document/files/create_qwen_voice.py) 仍然保留，但现在只是兼容入口。  
-后续更推荐直接使用 [`record_voice.py`](/C:/Users/30909/Desktop/document/files/record_voice.py)。
-
 ## 重要日志怎么看
 
 启动时建议重点看这些：

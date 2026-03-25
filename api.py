@@ -27,6 +27,8 @@ MAX_PIPELINE_LOG_LINES = 300
 
 sys.path.append(str(BASE_DIR))
 from translator import LightTranslator
+from record_voice import activate_voice
+from record_voice import _load_registry
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [API] %(message)s")
@@ -257,6 +259,10 @@ class LanguageConfigUpdate(BaseModel):
         return value
 
 
+class VoiceActivateRequest(BaseModel):
+    index: int
+
+
 def _build_stack_payload() -> dict:
     use_qwen_asr = os.getenv("USE_QWEN_ASR_API", "false").lower() == "true"
     use_local_mt = os.getenv("USE_LOCAL_MT", "false").lower() == "true"
@@ -302,6 +308,7 @@ def _build_stack_payload() -> dict:
         },
         "voice": {
             "configured": bool(os.getenv("QWEN_TTS_VOICE", "").strip()),
+            "current_voice": os.getenv("QWEN_TTS_VOICE", "").strip() or None,
             "reference_sample": os.getenv("VOICE_SAMPLE", "voice_samples/my_voice.wav"),
         },
     }
@@ -346,6 +353,29 @@ async def update_language_config(payload: LanguageConfigUpdate):
             "source_lang": payload.source_lang,
             "target_lang": payload.target_lang,
             "message": "Updated QWEN_ASR_LANGUAGE and MT_SOURCE_LANG together.",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/voices")
+async def get_voices():
+    try:
+        entries = _load_registry()
+        return {"voices": entries}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/voices/activate")
+async def post_activate_voice(payload: VoiceActivateRequest):
+    try:
+        chosen = activate_voice(payload.index)
+        return {
+            "status": "success",
+            "voice": chosen["qwen_tts_voice"],
+            "sample_path": chosen["sample_path"],
+            "message": f"Activated voice #{payload.index}",
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

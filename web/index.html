@@ -134,6 +134,26 @@
           </div>
         </section>
 
+        <section class="panel voice-panel">
+          <div class="panel-head">
+            <p class="panel-kicker">Voice</p>
+            <h2>音色切换</h2>
+          </div>
+          <form id="voice-form" class="translate-form">
+            <label class="field full">
+              <span>Saved Voices</span>
+              <select id="voice-select"></select>
+            </label>
+            <div class="form-actions">
+              <button type="submit" class="action-button">激活当前音色</button>
+              <button type="button" class="ghost-button" id="reload-voices">刷新列表</button>
+            </div>
+          </form>
+          <div class="inline-status">
+            <span id="voice-status">Idle</span>
+          </div>
+        </section>
+
         <section class="panel control-panel">
           <div class="panel-head">
             <p class="panel-kicker">Control</p>
