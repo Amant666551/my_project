@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Realtime Speech Control Deck</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg-grid"></div>
+    <div class="bg-orb orb-a"></div>
+    <div class="bg-orb orb-b"></div>
+    <div class="bg-orb orb-c"></div>
+
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Realtime Speech Pipeline</p>
+          <h1>语音翻译控制台</h1>
+          <p class="hero-text">
+            一个偏科幻风格的运行面板，用来观察当前 ASR、MT、TTS
+            链路，控制主程序启动与停止，并直接修改翻译方向。
+          </p>
+          <div class="hero-badges">
+            <span class="hero-badge">ASR / MT / TTS</span>
+            <span class="hero-badge">Live Stack</span>
+            <span class="hero-badge">Pipeline Control</span>
+          </div>
+        </div>
+        <div class="hero-status" id="health-card">
+          <div class="status-label">Service</div>
+          <div class="status-value">Loading...</div>
+          <div class="status-sub">Waiting for backend</div>
+          <div class="status-pulse"></div>
+        </div>
+      </header>
+
+      <main class="dashboard-grid">
+        <section class="panel flow-panel">
+          <div class="panel-head">
+            <p class="panel-kicker">Live Route</p>
+            <h2>当前运行链路</h2>
+          </div>
+          <div class="flow-track">
+            <div class="flow-node">
+              <span class="flow-tag">ASR</span>
+              <strong id="asr-primary">--</strong>
+              <small id="asr-fallback">fallback: --</small>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-node">
+              <span class="flow-tag">MT</span>
+              <strong id="mt-primary">--</strong>
+              <small id="mt-language">--</small>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-node">
+              <span class="flow-tag">TTS</span>
+              <strong id="tts-primary">--</strong>
+              <small id="tts-fallback">fallback: --</small>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel stack-panel">
+          <div class="panel-head">
+            <p class="panel-kicker">Runtime</p>
+            <h2>模型与配置</h2>
+          </div>
+          <div class="stack-cards">
+            <article class="stack-card">
+              <span>ASR</span>
+              <strong id="asr-model">--</strong>
+              <small id="asr-language">--</small>
+            </article>
+            <article class="stack-card">
+              <span>MT</span>
+              <strong id="mt-model">--</strong>
+              <small id="mt-direction">--</small>
+            </article>
+            <article class="stack-card">
+              <span>TTS</span>
+              <strong id="tts-model">--</strong>
+              <small id="tts-voice">--</small>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel config-panel">
+          <div class="panel-head">
+            <p class="panel-kicker">Direction</p>
+            <h2>语言方向设置</h2>
+          </div>
+          <form id="direction-form" class="translate-form">
+            <label class="field">
+              <span>Source Lang</span>
+              <select id="runtime-source-lang">
+                <option value="zh">Chinese</option>
+                <option value="en">English</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+                <option value="es">Spanish</option>
+                <option value="ar">Arabic</option>
+                <option value="ru">Russian</option>
+                <option value="pt">Portuguese</option>
+                <option value="it">Italian</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Target Lang</span>
+              <select id="runtime-target-lang">
+                <option value="en">English</option>
+                <option value="zh">Chinese</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+                <option value="es">Spanish</option>
+                <option value="ar">Arabic</option>
+                <option value="ru">Russian</option>
+                <option value="pt">Portuguese</option>
+                <option value="it">Italian</option>
+              </select>
+            </label>
+            <div class="form-actions">
+              <button type="submit" class="action-button">保存到 .env</button>
+              <button type="button" class="ghost-button" id="reload-direction">重新读取</button>
+            </div>
+          </form>
+          <div class="inline-status">
+            <span id="direction-status">Idle</span>
+          </div>
+        </section>
+
+        <section class="panel control-panel">
+          <div class="panel-head">
+            <p class="panel-kicker">Control</p>
+            <h2>主程序控制</h2>
+          </div>
+          <div class="control-strip">
+            <div class="run-state">
+              <span>Pipeline</span>
+              <strong id="pipeline-state">Unknown</strong>
+              <small id="pipeline-pid">PID: --</small>
+            </div>
+            <div class="form-actions">
+              <button type="button" class="action-button" id="start-pipeline">Start</button>
+              <button type="button" class="ghost-button" id="stop-pipeline">Stop</button>
+              <button type="button" class="ghost-button" id="refresh-pipeline">Refresh</button>
+            </div>
+          </div>
+          <div class="log-box">
+            <div class="result-head">
+              <span>Pipeline Logs</span>
+              <span id="pipeline-status-note">Idle</span>
+            </div>
+            <pre id="pipeline-logs" class="log-text">Waiting for pipeline logs...</pre>
+          </div>
+        </section>
+
+        <section class="panel workbench-panel">
+          <div class="panel-head">
+            <p class="panel-kicker">Workbench</p>
+            <h2>本地翻译测试台</h2>
+          </div>
+          <form id="translate-form" class="translate-form">
+            <label class="field">
+              <span>Source</span>
+              <select id="source-lang">
+                <option value="zh">Chinese</option>
+                <option value="en">English</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+                <option value="es">Spanish</option>
+                <option value="ar">Arabic</option>
+                <option value="ru">Russian</option>
+                <option value="pt">Portuguese</option>
+                <option value="it">Italian</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Target</span>
+              <select id="target-lang">
+                <option value="en">English</option>
+                <option value="zh">Chinese</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+                <option value="es">Spanish</option>
+                <option value="ar">Arabic</option>
+                <option value="ru">Russian</option>
+                <option value="pt">Portuguese</option>
+                <option value="it">Italian</option>
+              </select>
+            </label>
+            <label class="field full">
+              <span>Input</span>
+              <textarea
+                id="source-text"
+                rows="5"
+                placeholder="在这里输入一句话，测试 /translate 接口。"
+              ></textarea>
+            </label>
+            <div class="form-actions">
+              <button type="submit" class="action-button">Translate</button>
+              <button type="button" class="ghost-button" id="use-runtime-direction">
+                Use Runtime Direction
+              </button>
+            </div>
+          </form>
+          <div class="result-box">
+            <div class="result-head">
+              <span>Output</span>
+              <span id="result-status">Idle</span>
+            </div>
+            <div id="result-text" class="result-text">等待输入...</div>
+          </div>
+        </section>
+
+        <section class="panel notes-panel">
+          <div class="panel-head">
+            <p class="panel-kicker">Notes</p>
+            <h2>说明</h2>
+          </div>
+          <ul class="notes-list">
+            <li>页面现在可以直接修改 `.env` 里的 `MT_SOURCE_LANG` 和 `MT_TARGET_LANG`。</li>
+            <li>Start 会启动当前工作区里的 `orchestrator.py`。</li>
+            <li>Stop 会停止由当前页面启动的主管线进程。</li>
+            <li>这里的翻译测试台调用的是 `/translate`，用于验证本地翻译接口。</li>
+          </ul>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
