@@ -27,6 +27,7 @@ import torch
 from dotenv import load_dotenv
 from pyrnnoise import RNNoise
 
+from aec import EchoCanceller
 from main import speak as tts_speak
 
 load_dotenv()
@@ -113,6 +114,8 @@ class _FrontEndDecision:
 
 class _SpeechFrontEnd:
     def __init__(self):
+        self.echo_canceller = EchoCanceller(frame_size=FRAME_SIZE, sample_rate=SAMPLE_RATE)
+        print(self.echo_canceller.describe())
         self.rnnoise = RNNoise(sample_rate=SAMPLE_RATE)
         self.vad_model, _ = torch.hub.load(
             repo_or_dir="snakers4/silero-vad",
@@ -182,7 +185,8 @@ class _SpeechFrontEnd:
         self._silence_frames = 0
 
     def process_audio(self, audio: np.ndarray) -> _FrontEndDecision:
-        filtered = self._high_pass(audio)
+        cleaned = self.echo_canceller.process_capture(audio)
+        filtered = self._high_pass(cleaned)
         denoised = self._denoise(filtered)
         if denoised.size == 0:
             return _FrontEndDecision(feed_chunks=[])

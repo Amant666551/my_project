@@ -37,9 +37,7 @@ import asyncio
 import base64
 import json
 import os
-import platform
 import queue
-import subprocess
 import sys
 import tempfile
 import threading
@@ -60,6 +58,8 @@ import numpy as np
 import redis
 import torch
 from dotenv import load_dotenv
+
+from audio_player import play_audio_file
 
 # =============================================================================
 # USER CONFIGURATION
@@ -688,34 +688,7 @@ log.info(
 # =============================================================================
 
 def _play_file(path: str) -> None:
-    try:
-        import pygame
-
-        pygame.mixer.init()
-        pygame.mixer.music.load(path)
-        pygame.mixer.music.play()
-        while pygame.mixer.music.get_busy():
-            time.sleep(0.05)
-        pygame.mixer.music.stop()
-        pygame.mixer.quit()
-        return
-    except Exception as exc:
-        log.warning("pygame failed (%s) - trying system player ...", exc)
-
-    system = platform.system()
-    try:
-        if system == "Windows":
-            os.startfile(path)
-            time.sleep(max(2.0, Path(path).stat().st_size / 16_000))
-        elif system == "Darwin":
-            subprocess.run(["afplay", path], check=True)
-        else:
-            for player in ("mpg123", "mpg321", "ffplay", "aplay"):
-                if subprocess.run(["which", player], capture_output=True).returncode == 0:
-                    subprocess.run([player, "-q", path], check=True)
-                    break
-    except Exception as exc:
-        log.error("System player failed: %s", exc)
+    play_audio_file(path, logger=log)
 
 
 # =============================================================================

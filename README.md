@@ -18,7 +18,7 @@
 
 ## 当前版本状态
 
-当前版本以 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 为主管线入口，已经完成了两类关键工作：
+当前版本以 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 为主管线入口，已经完成了三类关键工作：
 
 ### 1. ASR 前处理增强
 
@@ -31,7 +31,7 @@
 
 ### 2. 串行主管线拆分为并行流水线
 
-当前主管线已不再是“ASR 出句后同步卡住整个循环再做 MT/TTS”，而是拆成了独立工作线程：
+当前主管线已拆成独立工作线程：
 
 - 音频输入回调：持续向 `_audio_q` 投递音频
 - `ASR worker`：持续消费音频并产出句子
@@ -44,9 +44,27 @@
 - TTS 已经与采音/识别链路解耦
 - 系统更接近真正的流式流水线
 
-## 已验证结论
+### 3. AEC-ready 架构骨架已接入
 
-这几个结论已经通过实际测试验证过：
+为了后续研究真正的全双工回声消除，本版本已经把 AEC 所需的接线骨架提前接进代码：
+
+- [`aec.py`](/C:/Users/30909/Desktop/document/files/aec.py)
+- [`playback_bus.py`](/C:/Users/30909/Desktop/document/files/playback_bus.py)
+- [`audio_player.py`](/C:/Users/30909/Desktop/document/files/audio_player.py)
+
+当前状态下：
+
+- TTS 播放优先走受控播放链路
+- 播放中的音频会被写入 `playback_bus`
+- 麦克风输入会先经过 `aec.py`，再进入当前前处理链路
+
+注意：
+
+- 这一版已经在 [`aec.py`](/C:/Users/30909/Desktop/document/files/aec.py) 中接入了真实 AEC 后端实验分支，当前实验后端是 `pyaec`
+- 经当前机器实测，`pyaec` 在外放双讲场景下会误伤近端人声，因此当前推荐默认保持 `ENABLE_AEC=false`
+- 这一步的目标是在不改 ASR / MT / TTS 模型选型的前提下，把外放全双工所需的 AEC 接口与播放参考链路先接通并验证
+
+## 已验证结论
 
 ### 1. 并行流水线是有效的
 
@@ -68,7 +86,7 @@
 - 但尚未具备真正稳定的“外放全双工”能力
 - 外放场景下的主要问题之一是：TTS 播报回灌到麦克风，污染 ASR
 
-也就是说，后续若要实现真正的全双工外放，需要研究 `AEC`，即回声消除。
+也就是说，后续若要实现真正的全双工外放，需要接入真实的 `AEC` 后端。
 
 ### 3. `input overflow` 仍然存在
 
@@ -90,6 +108,9 @@
 files/
 - orchestrator.py          # 主管线：采音 + ASR + MT + TTS 的并行调度
 - main.py                  # TTS 后端与播放逻辑
+- aec.py                   # AEC 接口层，已预接 pyaec backend，未启用时安全透传
+- playback_bus.py          # 播放参考音频环形缓冲
+- audio_player.py          # 受控音频播放，负责把 render reference 写入 playback_bus
 - api.py                   # 前端服务、控制接口、本地翻译接口
 - translator.py            # 本地翻译模型封装
 - record_voice.py          # 录音、创建 voice、激活 voice
@@ -119,6 +140,7 @@ files/
 - 主路由：`Qwen ASR Realtime`
 - 回退：`sherpa-onnx zipformer`
 - 前处理：
+  - AEC 接口层（当前默认透传）
   - 高通滤波
   - `RNNoise`
   - `Silero VAD`
@@ -133,6 +155,10 @@ files/
 
 - 主路由：`Qwen TTS VC`
 - 回退：`XTTS`
+- 播放：
+  - 优先走受控播放链路
+  - 播放音频可被写入 `playback_bus`
+  - 为后续 AEC 提供 render reference
 
 ## 运行方式
 
@@ -184,6 +210,34 @@ python orchestrator.py
 - 独立 `MT worker`
 - 独立 `TTS worker`
 - Qwen ASR websocket 断线后的自动重连
+- AEC 接口层接入点
+
+### `aec.py`
+
+负责 AEC 接口封装：
+
+- 初始化 AEC 接口
+- 接收麦克风音频帧
+- 从 `playback_bus` 读取 render reference
+- 输出处理后的 capture 音频
+
+当前默认后端是透传，不改变音频。
+
+### `playback_bus.py`
+
+负责 render reference 管理：
+
+- 保存近期播放音频
+- 维护播放状态
+- 为未来真实 AEC 后端提供参考音频
+
+### `audio_player.py`
+
+负责受控播放：
+
+- 尽量使用 `sounddevice + soundfile` 进行程序内可控播放
+- 播放时把 render reference 写入 `playback_bus`
+- 如受控播放失败，再退回旧的黑盒播放器
 
 ### `main.py`
 
@@ -192,6 +246,7 @@ python orchestrator.py
 - 优先尝试 `Qwen TTS API`
 - 失败时回退到本地后端
 - 当前本地回退默认是 `XTTS`
+- 播放环节已经接到 [`audio_player.py`](/C:/Users/30909/Desktop/document/files/audio_player.py)
 
 ### `api.py`
 
@@ -263,6 +318,30 @@ QWEN_TTS_VOICE=your_voice_id
 QWEN_TTS_BASE_HTTP_API_URL=https://dashscope.aliyuncs.com/api/v1
 VOICE_SAMPLE=voice_samples/voice_001.wav
 ```
+
+### AEC 配置项
+
+当前版本已经支持读取这些配置，但不要求你现在就设置：
+
+```env
+ENABLE_AEC=false
+AEC_BACKEND=pyaec
+AEC_SAMPLE_RATE=16000
+AEC_FRAME_SIZE=160
+AEC_FILTER_LENGTH=1600
+AEC_DELAY_MS=120
+AEC_BYPASS_WHEN_NO_RENDER=true
+AEC_PLAYER_CHUNK_SIZE=1024
+AEC_PLAYBACK_BUFFER_SEC=6.0
+```
+
+说明：
+
+- 当前默认 `ENABLE_AEC=false`
+- 当 `ENABLE_AEC=true` 时，会优先尝试 `AEC_BACKEND=pyaec`
+- 如果 `pyaec` 未安装或初始化失败，会自动回退到 `passthrough`
+- `AEC_FRAME_SIZE` 和 `AEC_FILTER_LENGTH` 是 `pyaec` 后端的内部处理参数，先保留默认值即可
+- 目前实测结论是：`pyaec` 已完成接入验证，但不建议在当前项目里默认开启
 
 ## 当前主管线关键运行参数
 
@@ -380,6 +459,7 @@ python record_voice.py --activate 2
 - `[Pipeline config] ...`
 - `[MT model ] provider=deepseek | model=deepseek-chat`
 - 或 `[MT model ] provider=local_api | url=...`
+- `[AEC] enabled=... | backend=...`
 - `[ASR model] provider=qwen_api | model=... | language=...`
 - 或 `[ASR model] provider=sherpa-onnx | model_path=...`
 - `[ASR route] primary=qwen_api | fallback=zipformer`
@@ -402,13 +482,13 @@ python record_voice.py --activate 2
 
 ### 1. 外放场景尚未具备真正稳定的全双工能力
 
-虽然并行流水线已经完成，但在外放状态下边播边说时，TTS 仍可能通过扬声器回灌到麦克风，污染 ASR 结果。
+虽然并行流水线和 AEC 接口骨架已经完成，`aec.py` 里也已经接入了 `pyaec` 实验分支，但当前机器实测表明：开启 `pyaec` 后，双讲时近端人声会被明显抑制；关闭 AEC 反而更容易识别出用户插话。
 
-耳机测试基本确认这是当前主要问题之一。
+这说明当前阶段的问题主要不在“接口没接上”，而在“当前 AEC 后端能力不足以支撑稳定的外放双讲”。耳机测试和 AEC on/off 对照测试都支持这一判断。
 
-后续如果要把系统做成真正的外放全双工，需要研究：
+后续如果要把系统做成真正的外放全双工，需要接入：
 
-- `AEC` 回声消除
+- 真实 `AEC` 后端，例如 WebRTC AEC
 
 ### 2. ASR 前处理仍然存在实时压力
 
@@ -434,6 +514,15 @@ python record_voice.py --activate 2
 
 如果后续要继续提升稳定性，可以考虑把这部分彻底本地化。
 
+### 5. 受控播放仍可能因格式或设备问题回退到旧播放器
+
+当前 [`audio_player.py`](/C:/Users/30909/Desktop/document/files/audio_player.py) 会优先尝试受控播放；如果失败，仍会回退到旧的黑盒播放器。
+
+这意味着：
+
+- 大多数 WAV 路径已经能进入 AEC-ready 播放链路
+- 若回退发生，则当次播放无法为未来 AEC 提供精确 render reference
+
 ## 当前研发结论
 
 截至这个版本，我们已经确认：
@@ -442,7 +531,8 @@ python record_voice.py --activate 2
 - 吞首字问题已明显改善
 - 键盘/鼠标误触发已明显下降
 - 耳机可显著缓解识别污染
-- 真正的外放全双工问题已经聚焦到 `AEC`
+- 当前代码已经具备 AEC-ready 架构
+- 真正的外放全双工问题已经聚焦到“接入真实 AEC 后端”
 
 这也是下一阶段的主要研究方向。
 
