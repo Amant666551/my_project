@@ -4,49 +4,91 @@
 
 `麦克风输入 -> ASR -> MT -> TTS`
 
-当前已经接通并可运行的常见组合是：
+目前常见可运行组合是：
 
 `Qwen ASR -> DeepSeek MT -> Qwen TTS`
 
-项目同时保留了本地回退路径：
+同时保留了本地回退路径：
 
-- ASR：本地 `sherpa-onnx zipformer`
+- ASR：`sherpa-onnx zipformer`
 - MT：本地 `/translate` 接口
-- TTS：本地 `XTTS`
+- TTS：`XTTS`
 
-项目带有一个前端控制台，可用于查看当前链路、修改语言方向、切换 voice，以及启动/停止主管线。
+项目带有前端控制台，可查看当前链路、修改语言方向、切换 voice，并启动/停止主管线。
 
-## 当前代码状态
+## 当前版本状态
 
-当前版本以 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 为主控制入口，已经做了以下 ASR 前处理增强：
+当前版本以 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 为主管线入口，已经完成了两类关键工作：
 
-- 本地高通滤波
-- 本地 `RNNoise` 降噪
-- 本地 `Silero VAD`
-- 平滑后的双阈值 VAD 门控
+### 1. ASR 前处理增强
+
+- 高通滤波
+- `RNNoise` 降噪
+- `Silero VAD`
+- 平滑后的双阈值门控
 - pre-roll 缓冲，减少吞首字
 - 有界音频队列，避免极端情况下无限堆积
 
-当前主管线仍然是单主循环结构：
+### 2. 串行主管线拆分为并行流水线
 
-1. 持续采集音频
-2. 把音频送入 ASR
-3. ASR 出句后同步调用 MT
-4. MT 成功后将文本送入 TTS 队列
+当前主管线已不再是“ASR 出句后同步卡住整个循环再做 MT/TTS”，而是拆成了独立工作线程：
+
+- 音频输入回调：持续向 `_audio_q` 投递音频
+- `ASR worker`：持续消费音频并产出句子
+- `MT worker`：持续消费 ASR 文本并翻译
+- `TTS worker`：持续消费翻译结果并播报
 
 这意味着：
 
-- TTS 已经通过线程队列做了串行播放
-- 但 ASR 与 MT 目前仍然串行耦合
-- 在 MT 或其他阶段变慢时，可能看到音频队列积压或 `input overflow`
+- MT 或 TTS 变慢时，不会像旧版本那样直接卡死前面的 ASR 消费
+- TTS 已经与采音/识别链路解耦
+- 系统更接近真正的流式流水线
 
-这属于当前版本的已知结构限制，不影响基本功能可用，但会影响高负载下的实时稳定性。
+## 已验证结论
+
+这几个结论已经通过实际测试验证过：
+
+### 1. 并行流水线是有效的
+
+在连续说多句、上一句还在播报时继续说下一句的场景下：
+
+- ASR 仍能继续出句
+- MT 仍能继续翻译
+- TTS 可继续按队列播放
+
+说明当前并行改造方向是正确的。
+
+### 2. 耳机测试基本确认了“回音串音”问题
+
+在外放场景下，边播边说时容易出现明显识别污染；戴耳机后，识别质量明显改善。
+
+这说明：
+
+- 当前系统已经具备并行能力
+- 但尚未具备真正稳定的“外放全双工”能力
+- 外放场景下的主要问题之一是：TTS 播报回灌到麦克风，污染 ASR
+
+也就是说，后续若要实现真正的全双工外放，需要研究 `AEC`，即回声消除。
+
+### 3. `input overflow` 仍然存在
+
+即使在耳机测试下，日志中仍可能持续看到：
+
+```text
+[Audio] input overflow | overflow_count=...
+```
+
+这说明当前 ASR 前处理链路仍有实时压力。它不一定立刻导致系统不可用，但会影响稳定性，并可能在高负载或连续说话时带来：
+
+- 句子截断
+- 短词误识别
+- 结果偶发扭曲
 
 ## 项目结构
 
 ```text
 files/
-- orchestrator.py          # 主管线：采音 + ASR + MT 调度 + TTS 投递
+- orchestrator.py          # 主管线：采音 + ASR + MT + TTS 的并行调度
 - main.py                  # TTS 后端与播放逻辑
 - api.py                   # 前端服务、控制接口、本地翻译接口
 - translator.py            # 本地翻译模型封装
@@ -133,9 +175,15 @@ python orchestrator.py
 - 本地前处理
 - ASR
 - MT
-- 投递到 TTS 队列
+- TTS 调度
 
-当前 TTS 已经单独走工作线程，避免一条语音播放时打断另一条语音播放。
+当前已经包含：
+
+- 独立音频输入队列
+- 独立 `ASR worker`
+- 独立 `MT worker`
+- 独立 `TTS worker`
+- Qwen ASR websocket 断线后的自动重连
 
 ### `main.py`
 
@@ -162,7 +210,7 @@ python orchestrator.py
 注意：
 
 - `/translate` 只用于本地翻译接口测试或本地 MT 路由
-- 主管线中的翻译调度仍由 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 控制
+- 实时主管线中的翻译调度仍由 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 控制
 
 ### `record_voice.py`
 
@@ -216,9 +264,9 @@ QWEN_TTS_BASE_HTTP_API_URL=https://dashscope.aliyuncs.com/api/v1
 VOICE_SAMPLE=voice_samples/voice_001.wav
 ```
 
-### 当前 ASR 采音相关默认值
+## 当前主管线关键运行参数
 
-这些值现在由 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 控制：
+这些值由 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 控制：
 
 ```text
 SAMPLE_RATE=16000
@@ -226,9 +274,11 @@ FRAME_SIZE=512
 CHANNELS=1
 ASR_INPUT_LATENCY=high
 ASR_AUDIO_QUEUE_MAX_CHUNKS=64
+ASR_RESULT_QUEUE_MAX=16
+TTS_QUEUE_MAX=16
 ```
 
-### 当前 ASR 前处理门控参数
+## 当前 ASR 前处理参数
 
 ```text
 RNNOISE_FRAME_SIZE=160
@@ -244,7 +294,11 @@ VAD_SMOOTHING_FRAMES=5
 MAX_SILENCE_FRAMES=30
 ```
 
-这些参数是当前针对“减少误触发，同时尽量避免吞首字”调过的一组默认值。
+这些参数是当前针对以下目标调过的一组默认值：
+
+- 减少键盘/鼠标误触发
+- 尽量避免吞首字
+- 保持外放前提下的基本可用性
 
 ## 语言方向设置
 
@@ -338,34 +392,59 @@ python record_voice.py --activate 2
 - `[ASR final  ]: ...`
 - `[MT  ]: ...`
 - `[TTS] INFO    TTS provider | provider=qwen_api | model=...`
+- `[ASR] Qwen websocket closed, reconnecting...`
 - `[Audio] input overflow | ...`
 - `[Audio] capture queue full, dropping oldest buffered chunk ...`
-
-其中最后两类日志表示当前实时链路存在采音积压。
+- `[Queue] asr_text queue full, dropping oldest item ...`
+- `[Queue] tts queue full, dropping oldest item ...`
 
 ## 当前已知问题
 
-### 1. 主管线仍然是串行主循环
+### 1. 外放场景尚未具备真正稳定的全双工能力
 
-当前版本下，ASR 出句后 MT 仍在主管线中同步执行，因此在网络抖动、翻译变慢或后续处理变慢时，可能造成：
+虽然并行流水线已经完成，但在外放状态下边播边说时，TTS 仍可能通过扬声器回灌到麦克风，污染 ASR 结果。
 
-- `_audio_q` 积压
-- 音频块丢弃
-- `input overflow`
+耳机测试基本确认这是当前主要问题之一。
 
-### 2. Qwen TTS 可能偶发超时
+后续如果要把系统做成真正的外放全双工，需要研究：
 
-日志中如果出现：
+- `AEC` 回声消除
 
-```text
-Qwen TTS synthesis failed: ... Read timed out
-```
+### 2. ASR 前处理仍然存在实时压力
 
-则会自动回退到本地 TTS。
+当前日志中仍可能持续看到：
 
-### 3. 当前 README 以现有代码为准
+- `[Audio] input overflow`
 
-如果后续我们继续把主管线拆成真正的异步流水线，README 也需要同步更新。
+这说明当前前处理链路仍有性能压力，后续还可以继续优化。
+
+### 3. Qwen ASR 与 Qwen TTS 都受网络稳定性影响
+
+目前两者都属于远程依赖，因此可能遇到：
+
+- websocket 连接关闭
+- 空闲超时
+- HTTP 下载超时
+
+当前代码已经对 Qwen ASR 空闲断线做了自动重连；Qwen TTS 失败时会自动回退到本地 XTTS。
+
+### 4. 本地 VAD 初始化仍可能受网络影响
+
+当前 `Silero VAD` 通过 `torch.hub.load(...)` 初始化。在某些环境下，如果本地缓存不可用，初始化阶段仍可能访问网络。
+
+如果后续要继续提升稳定性，可以考虑把这部分彻底本地化。
+
+## 当前研发结论
+
+截至这个版本，我们已经确认：
+
+- 并行流水线方向正确
+- 吞首字问题已明显改善
+- 键盘/鼠标误触发已明显下降
+- 耳机可显著缓解识别污染
+- 真正的外放全双工问题已经聚焦到 `AEC`
+
+这也是下一阶段的主要研究方向。
 
 ## 安全说明
 

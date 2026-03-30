@@ -15,6 +15,7 @@ import os
 import queue
 import sys
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 
@@ -61,6 +62,8 @@ FRAME_SIZE = 512
 CHANNELS = 1
 AUDIO_INPUT_LATENCY = os.getenv("ASR_INPUT_LATENCY", "high")
 AUDIO_QUEUE_MAX_CHUNKS = int(os.getenv("ASR_AUDIO_QUEUE_MAX_CHUNKS", "64"))
+ASR_RESULT_QUEUE_MAX = int(os.getenv("ASR_RESULT_QUEUE_MAX", "16"))
+TTS_QUEUE_MAX = int(os.getenv("TTS_QUEUE_MAX", "16"))
 
 MT_URL = os.getenv("MT_URL", "http://127.0.0.1:8000/translate")
 MT_SOURCE_LANG = os.getenv("MT_SOURCE_LANG", "zh")
@@ -130,19 +133,18 @@ class _SpeechFrontEnd:
         if audio.size == 0:
             return audio
 
-        filtered = np.empty_like(audio, dtype=np.float32)
-        prev_x = self._hpf_prev_x
-        prev_y = self._hpf_prev_y
+        samples = audio.astype(np.float32, copy=False)
+        diff = np.empty_like(samples, dtype=np.float64)
+        diff[0] = float(samples[0]) - self._hpf_prev_x + (HPF_ALPHA * self._hpf_prev_y)
+        if samples.size > 1:
+            diff[1:] = np.diff(samples.astype(np.float64, copy=False))
 
-        for idx, sample in enumerate(audio.astype(np.float32, copy=False)):
-            current = sample - prev_x + (HPF_ALPHA * prev_y)
-            filtered[idx] = current
-            prev_x = float(sample)
-            prev_y = float(current)
+        powers = np.power(HPF_ALPHA, np.arange(samples.size, dtype=np.float64))
+        filtered = powers * np.cumsum(diff / powers)
 
-        self._hpf_prev_x = prev_x
-        self._hpf_prev_y = prev_y
-        return np.clip(filtered, -1.0, 1.0)
+        self._hpf_prev_x = float(samples[-1])
+        self._hpf_prev_y = float(filtered[-1])
+        return np.clip(filtered, -1.0, 1.0).astype(np.float32, copy=False)
 
     def _denoise(self, audio: np.ndarray) -> np.ndarray:
         if audio.size == 0:
@@ -337,31 +339,48 @@ class QwenStreamingASR:
             raise ImportError("dashscope>=1.25.6 is required for Qwen ASR") from exc
 
         dashscope.api_key = DASHSCOPE_API_KEY
+        self._dashscope = dashscope
+        self._MultiModality = MultiModality
+        self._OmniRealtimeConversation = OmniRealtimeConversation
+        self._TranscriptionParams = TranscriptionParams
         self._final_queue: queue.Queue[str] = queue.Queue()
         self._callback = _QwenASRCallback(self._final_queue)
         self.frontend = _SpeechFrontEnd()
-        self._conversation = OmniRealtimeConversation(
+        self._conversation = None
+        self._connect_conversation()
+
+        print(
+            "[ASR model] "
+            f"provider=qwen_api | model={QWEN_ASR_MODEL} | language={QWEN_ASR_LANGUAGE}"
+        )
+
+    def _connect_conversation(self) -> None:
+        self._conversation = self._OmniRealtimeConversation(
             model=QWEN_ASR_MODEL,
             url=QWEN_ASR_URL,
             callback=self._callback,
         )
         self._conversation.connect()
 
-        params = TranscriptionParams(
+        params = self._TranscriptionParams(
             language=QWEN_ASR_LANGUAGE,
             sample_rate=SAMPLE_RATE,
             input_audio_format="pcm",
         )
         self._conversation.update_session(
-            output_modalities=[MultiModality.TEXT],
+            output_modalities=[self._MultiModality.TEXT],
             enable_input_audio_transcription=True,
             transcription_params=params,
         )
 
-        print(
-            "[ASR model] "
-            f"provider=qwen_api | model={QWEN_ASR_MODEL} | language={QWEN_ASR_LANGUAGE}"
-        )
+    def _reconnect_conversation(self) -> None:
+        print("[ASR] Qwen websocket closed, reconnecting...")
+        try:
+            if self._conversation is not None:
+                self._conversation.close()
+        except Exception:
+            pass
+        self._connect_conversation()
 
     def process_audio(self, audio: np.ndarray) -> str:
         decision = self.frontend.process_audio(audio)
@@ -369,7 +388,14 @@ class QwenStreamingASR:
             pcm = np.clip(chunk, -1.0, 1.0)
             pcm16 = (pcm * 32767).astype(np.int16)
             audio_b64 = base64.b64encode(pcm16.tobytes()).decode("ascii")
-            self._conversation.append_audio(audio_b64)
+            try:
+                self._conversation.append_audio(audio_b64)
+            except Exception as exc:
+                message = str(exc).lower()
+                if "closed" not in message and "lost" not in message and "timeout" not in message:
+                    raise
+                self._reconnect_conversation()
+                self._conversation.append_audio(audio_b64)
         try:
             final = self._final_queue.get_nowait()
             print(f"\n[ASR final  ]: {final}")
@@ -491,9 +517,41 @@ def translate(text: str) -> str | None:
 
 
 _audio_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=AUDIO_QUEUE_MAX_CHUNKS)
-_tts_q: queue.Queue[tuple[str, str]] = queue.Queue()
+_asr_text_q: queue.Queue[str] = queue.Queue(maxsize=ASR_RESULT_QUEUE_MAX)
+_tts_q: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=TTS_QUEUE_MAX)
 _audio_overflow_count = 0
 _audio_drop_count = 0
+_queue_drop_counts = {
+    "asr_text": 0,
+    "tts": 0,
+}
+
+
+def _put_latest(queue_obj: queue.Queue, item, label: str) -> None:
+    try:
+        queue_obj.put_nowait(item)
+        return
+    except queue.Full:
+        pass
+
+    _queue_drop_counts[label] = _queue_drop_counts.get(label, 0) + 1
+
+    try:
+        queue_obj.get_nowait()
+    except queue.Empty:
+        pass
+
+    try:
+        queue_obj.put_nowait(item)
+    except queue.Full:
+        pass
+
+    drop_count = _queue_drop_counts[label]
+    if drop_count == 1 or drop_count % 10 == 0:
+        print(
+            f"[Queue] {label} queue full, dropping oldest item (drop_count={drop_count})",
+            file=sys.stderr,
+        )
 
 
 def _audio_callback(indata, frames, time_info, status):
@@ -530,9 +588,47 @@ def _run_tts(text: str, lang: str) -> None:
         print(f"[TTS thread] crashed: {exc}")
 
 
-def _tts_worker() -> None:
-    while True:
-        text, lang = _tts_q.get()
+def _asr_worker(asr, stop_event: threading.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            chunk = _audio_q.get(timeout=0.2)
+        except queue.Empty:
+            continue
+
+        try:
+            try:
+                final = asr.process_audio(chunk)
+                if final:
+                    _put_latest(_asr_text_q, final, "asr_text")
+            except Exception as exc:
+                print(f"[ASR worker] recoverable error: {exc}", file=sys.stderr)
+                time.sleep(0.2)
+        finally:
+            _audio_q.task_done()
+
+
+def _mt_worker(stop_event: threading.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            text = _asr_text_q.get(timeout=0.2)
+        except queue.Empty:
+            continue
+
+        try:
+            translation = translate(text)
+            if translation:
+                _put_latest(_tts_q, (translation, MT_TARGET_LANG), "tts")
+        finally:
+            _asr_text_q.task_done()
+
+
+def _tts_worker(stop_event: threading.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            text, lang = _tts_q.get(timeout=0.2)
+        except queue.Empty:
+            continue
+
         try:
             _run_tts(text, lang)
         finally:
@@ -545,6 +641,7 @@ def main():
         "[Pipeline config] "
         f"audio_sample_rate={SAMPLE_RATE} | frame_size={FRAME_SIZE} | channels={CHANNELS} | "
         f"input_latency={AUDIO_INPUT_LATENCY} | audio_queue_max_chunks={AUDIO_QUEUE_MAX_CHUNKS} | "
+        f"asr_result_queue_max={ASR_RESULT_QUEUE_MAX} | tts_queue_max={TTS_QUEUE_MAX} | "
         f"mt_target_lang={MT_TARGET_LANG}"
     )
 
@@ -557,7 +654,31 @@ def main():
         print(f"[MT model ] provider=deepseek | model={DEEPSEEK_MODEL}")
 
     asr = build_asr_backend()
-    threading.Thread(target=_tts_worker, daemon=True, name="tts-worker").start()
+    stop_event = threading.Event()
+    workers = [
+        threading.Thread(
+            target=_asr_worker,
+            args=(asr, stop_event),
+            daemon=True,
+            name="asr-worker",
+        ),
+        threading.Thread(
+            target=_mt_worker,
+            args=(stop_event,),
+            daemon=True,
+            name="mt-worker",
+        ),
+        threading.Thread(
+            target=_tts_worker,
+            args=(stop_event,),
+            daemon=True,
+            name="tts-worker",
+        ),
+    ]
+
+    for worker in workers:
+        worker.start()
+
     print("\nSystem ready - start speaking!\n")
 
     try:
@@ -570,19 +691,13 @@ def main():
             callback=_audio_callback,
         ):
             while True:
-                chunk = _audio_q.get()
-                final = asr.process_audio(chunk)
-                if not final:
-                    continue
-
-                translation = translate(final)
-                if not translation:
-                    continue
-
-                _tts_q.put((translation, MT_TARGET_LANG))
+                time.sleep(0.5)
     except KeyboardInterrupt:
         print("\nPipeline stopped.")
     finally:
+        stop_event.set()
+        for worker in workers:
+            worker.join(timeout=1.0)
         asr.close()
 
 
