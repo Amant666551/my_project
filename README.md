@@ -18,7 +18,7 @@
 
 ## 当前版本状态
 
-当前版本以 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 为主管线入口，已经完成了三类关键工作：
+当前版本以 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 为主管线入口，已经完成了四类关键工作：
 
 ### 1. ASR 前处理增强
 
@@ -27,6 +27,7 @@
 - `Silero VAD`
 - 平滑后的双阈值门控
 - pre-roll 缓冲，减少吞首字
+- 自适应能量门限，根据静默噪声底动态调整 energy threshold
 - 有界音频队列，避免极端情况下无限堆积
 
 ### 2. 串行主管线拆分为并行流水线
@@ -63,6 +64,15 @@
 - 这一版已经在 [`aec.py`](/C:/Users/30909/Desktop/document/files/aec.py) 中接入了真实 AEC 后端实验分支，当前实验后端是 `pyaec`
 - 经当前机器实测，`pyaec` 在外放双讲场景下会误伤近端人声，因此当前推荐默认保持 `ENABLE_AEC=false`
 - 这一步的目标是在不改 ASR / MT / TTS 模型选型的前提下，把外放全双工所需的 AEC 接口与播放参考链路先接通并验证
+
+### 4. ASR 可观测性已接入
+
+当前版本已经在 ASR 内部加入轻量级运行指标统计，用于辅助调参和回归验证：
+
+- 周期性输出 `[ASR metrics] ...`
+- 统计起说次数、final 次数、短句重置次数、平均句长
+- 统计 `audio overflow`、队列丢弃、Qwen 重连、ASR worker 错误
+- 统计 `avg_vad`、`avg_rms`、`avg_noise_floor`、`avg_dynamic_threshold`
 
 ## 已验证结论
 
@@ -343,6 +353,34 @@ AEC_PLAYBACK_BUFFER_SEC=6.0
 - `AEC_FRAME_SIZE` 和 `AEC_FILTER_LENGTH` 是 `pyaec` 后端的内部处理参数，先保留默认值即可
 - 目前实测结论是：`pyaec` 已完成接入验证，但不建议在当前项目里默认开启
 
+### ASR 可观测性配置项
+
+```env
+ASR_METRICS_ENABLED=true
+ASR_METRICS_LOG_INTERVAL_SEC=30
+```
+
+说明：
+
+- `ASR_METRICS_ENABLED` 控制是否输出 `[ASR metrics]`
+- `ASR_METRICS_LOG_INTERVAL_SEC` 控制统计窗口长度
+
+### ASR 自适应门限配置项
+
+```env
+ADAPTIVE_ENERGY_ENABLED=true
+ADAPTIVE_ENERGY_NOISE_FLOOR_ALPHA=0.02
+ADAPTIVE_ENERGY_MIN_FACTOR=1.8
+ADAPTIVE_ENERGY_MAX_FACTOR=3.0
+ADAPTIVE_ENERGY_VAD_CEILING=0.12
+```
+
+说明：
+
+- 当前版本默认启用自适应门限
+- 只有在“当前不在说话”且 `vad_prob` 足够低时，系统才会更新噪声底估计
+- 动态门限不会低于基础 `ENERGY_THRESHOLD`
+
 ## 当前主管线关键运行参数
 
 这些值由 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 控制：
@@ -457,6 +495,8 @@ python record_voice.py --activate 2
 启动时：
 
 - `[Pipeline config] ...`
+- `[ASR observability] enabled=... | log_interval_sec=...`
+- `[ASR adaptive energy] enabled=... | base_threshold=...`
 - `[MT model ] provider=deepseek | model=deepseek-chat`
 - 或 `[MT model ] provider=local_api | url=...`
 - `[AEC] enabled=... | backend=...`
@@ -470,6 +510,7 @@ python record_voice.py --activate 2
 运行中：
 
 - `[ASR final  ]: ...`
+- `[ASR metrics] ...`
 - `[MT  ]: ...`
 - `[TTS] INFO    TTS provider | provider=qwen_api | model=...`
 - `[ASR] Qwen websocket closed, reconnecting...`

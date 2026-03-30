@@ -70,6 +70,8 @@ MT_URL = os.getenv("MT_URL", "http://127.0.0.1:8000/translate")
 MT_SOURCE_LANG = os.getenv("MT_SOURCE_LANG", "zh")
 MT_TARGET_LANG = os.getenv("MT_TARGET_LANG", "en")
 MT_TIMEOUT_SEC = int(os.getenv("MT_TIMEOUT_SEC", "8"))
+ASR_METRICS_ENABLED = os.getenv("ASR_METRICS_ENABLED", "true").lower() == "true"
+ASR_METRICS_LOG_INTERVAL_SEC = int(os.getenv("ASR_METRICS_LOG_INTERVAL_SEC", "30"))
 
 RNNOISE_FRAME_SIZE = 160
 HPF_ALPHA = 0.97
@@ -79,6 +81,11 @@ MIN_SPEECH_START_FRAMES = 2
 MIN_SPEECH_FRAMES = 6
 ENERGY_THRESHOLD = 0.008
 ENERGY_RELEASE_RATIO = 0.65
+ADAPTIVE_ENERGY_ENABLED = os.getenv("ADAPTIVE_ENERGY_ENABLED", "true").lower() == "true"
+ADAPTIVE_ENERGY_NOISE_FLOOR_ALPHA = float(os.getenv("ADAPTIVE_ENERGY_NOISE_FLOOR_ALPHA", "0.02"))
+ADAPTIVE_ENERGY_MIN_FACTOR = float(os.getenv("ADAPTIVE_ENERGY_MIN_FACTOR", "1.8"))
+ADAPTIVE_ENERGY_MAX_FACTOR = float(os.getenv("ADAPTIVE_ENERGY_MAX_FACTOR", "3.0"))
+ADAPTIVE_ENERGY_VAD_CEILING = float(os.getenv("ADAPTIVE_ENERGY_VAD_CEILING", "0.12"))
 PRE_SPEECH_FRAMES = 8
 VAD_SMOOTHING_FRAMES = 5
 MAX_SILENCE_FRAMES = 30
@@ -102,14 +109,146 @@ LANGUAGE_NAME_MAP = {
 }
 
 
+class _ASRMetrics:
+    def __init__(self):
+        self.enabled = ASR_METRICS_ENABLED
+        self.log_interval_sec = max(5, ASR_METRICS_LOG_INTERVAL_SEC)
+        self._lock = threading.Lock()
+        self._started_at = time.monotonic()
+        self._last_log_at = self._started_at
+        self._reset_locked()
+
+    def _reset_locked(self) -> None:
+        self.frontend_frames = 0
+        self.feed_decisions = 0
+        self.feed_chunks = 0
+        self.speech_start_count = 0
+        self.finalize_count = 0
+        self.short_reset_count = 0
+        self.vad_prob_sum = 0.0
+        self.rms_sum = 0.0
+        self.dynamic_threshold_sum = 0.0
+        self.noise_floor_sum = 0.0
+        self.finalized_speech_frames = 0
+        self.final_count = 0
+        self.final_char_sum = 0
+        self.qwen_reconnect_count = 0
+        self.asr_error_count = 0
+
+    def observe_frontend(self, decision: "_FrontEndDecision") -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self.frontend_frames += 1
+            self.vad_prob_sum += float(decision.vad_prob)
+            self.rms_sum += float(decision.rms)
+            self.dynamic_threshold_sum += float(decision.dynamic_energy_threshold)
+            self.noise_floor_sum += float(decision.noise_floor)
+            if decision.feed_chunks:
+                self.feed_decisions += 1
+                self.feed_chunks += len(decision.feed_chunks)
+            if decision.speech_started:
+                self.speech_start_count += 1
+            if decision.should_finalize:
+                self.finalize_count += 1
+                self.finalized_speech_frames += int(decision.speech_frames)
+                if decision.should_reset:
+                    self.short_reset_count += 1
+
+    def observe_final(self, text: str) -> None:
+        if not self.enabled:
+            return
+        stripped = text.strip()
+        if not stripped:
+            return
+        with self._lock:
+            self.final_count += 1
+            self.final_char_sum += len(stripped)
+
+    def observe_qwen_reconnect(self) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self.qwen_reconnect_count += 1
+
+    def observe_asr_error(self) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self.asr_error_count += 1
+
+    def maybe_log(self, force: bool = False) -> None:
+        if not self.enabled:
+            return
+
+        now = time.monotonic()
+        with self._lock:
+            elapsed = now - self._last_log_at
+            if not force and elapsed < self.log_interval_sec:
+                return
+
+            snapshot = {
+                "window_sec": elapsed,
+                "frontend_frames": self.frontend_frames,
+                "feed_decisions": self.feed_decisions,
+                "feed_chunks": self.feed_chunks,
+                "speech_start_count": self.speech_start_count,
+                "finalize_count": self.finalize_count,
+                "short_reset_count": self.short_reset_count,
+                "vad_prob_sum": self.vad_prob_sum,
+                "rms_sum": self.rms_sum,
+                "dynamic_threshold_sum": self.dynamic_threshold_sum,
+                "noise_floor_sum": self.noise_floor_sum,
+                "finalized_speech_frames": self.finalized_speech_frames,
+                "final_count": self.final_count,
+                "final_char_sum": self.final_char_sum,
+                "qwen_reconnect_count": self.qwen_reconnect_count,
+                "asr_error_count": self.asr_error_count,
+            }
+            self._reset_locked()
+            self._last_log_at = now
+
+        frontend_frames = max(1, snapshot["frontend_frames"])
+        finalize_count = max(1, snapshot["finalize_count"])
+        final_count = max(1, snapshot["final_count"])
+        avg_vad = snapshot["vad_prob_sum"] / frontend_frames
+        avg_rms = snapshot["rms_sum"] / frontend_frames
+        avg_dynamic_threshold = snapshot["dynamic_threshold_sum"] / frontend_frames
+        avg_noise_floor = snapshot["noise_floor_sum"] / frontend_frames
+        avg_utt_ms = (
+            snapshot["finalized_speech_frames"] * FRAME_SIZE * 1000.0 / SAMPLE_RATE / finalize_count
+        )
+        avg_final_chars = snapshot["final_char_sum"] / final_count if snapshot["final_count"] else 0.0
+
+        print(
+            "[ASR metrics] "
+            f"window={snapshot['window_sec']:.1f}s | frontend_frames={snapshot['frontend_frames']} | "
+            f"speech_starts={snapshot['speech_start_count']} | finals={snapshot['final_count']} | "
+            f"finalizes={snapshot['finalize_count']} | short_resets={snapshot['short_reset_count']} | "
+            f"feed_decisions={snapshot['feed_decisions']} | feed_chunks={snapshot['feed_chunks']} | "
+            f"avg_vad={avg_vad:.3f} | avg_rms={avg_rms:.4f} | avg_noise_floor={avg_noise_floor:.4f} | "
+            f"avg_dynamic_threshold={avg_dynamic_threshold:.4f} | avg_utt_ms={avg_utt_ms:.0f} | "
+            f"avg_final_chars={avg_final_chars:.1f} | audio_overflows={_audio_overflow_count} | "
+            f"audio_drops={_audio_drop_count} | asr_text_drops={_queue_drop_counts['asr_text']} | "
+            f"tts_drops={_queue_drop_counts['tts']} | qwen_reconnects={snapshot['qwen_reconnect_count']} | "
+            f"asr_errors={snapshot['asr_error_count']}"
+        )
+
+
+_asr_metrics = _ASRMetrics()
+
+
 @dataclass
 class _FrontEndDecision:
     feed_chunks: list[np.ndarray]
     should_finalize: bool = False
     should_reset: bool = False
+    speech_started: bool = False
     speech_frames: int = 0
     vad_prob: float = 0.0
     rms: float = 0.0
+    noise_floor: float = ENERGY_THRESHOLD
+    dynamic_energy_threshold: float = ENERGY_THRESHOLD
 
 
 class _SpeechFrontEnd:
@@ -131,6 +270,29 @@ class _SpeechFrontEnd:
         self._silence_frames = 0
         self._hpf_prev_x = 0.0
         self._hpf_prev_y = 0.0
+        self._noise_floor = ENERGY_THRESHOLD
+
+    def _update_noise_floor(self, rms: float, vad_prob: float) -> None:
+        if not ADAPTIVE_ENERGY_ENABLED:
+            return
+        if self._in_speech:
+            return
+        if vad_prob > ADAPTIVE_ENERGY_VAD_CEILING:
+            return
+
+        alpha = min(max(ADAPTIVE_ENERGY_NOISE_FLOOR_ALPHA, 0.001), 0.2)
+        self._noise_floor = ((1.0 - alpha) * self._noise_floor) + (alpha * rms)
+        self._noise_floor = max(1e-5, self._noise_floor)
+
+    def _energy_thresholds(self) -> tuple[float, float]:
+        if not ADAPTIVE_ENERGY_ENABLED:
+            start_threshold = ENERGY_THRESHOLD
+        else:
+            dynamic_floor = self._noise_floor * max(ADAPTIVE_ENERGY_MIN_FACTOR, 1.0)
+            dynamic_ceiling = self._noise_floor * max(ADAPTIVE_ENERGY_MAX_FACTOR, ADAPTIVE_ENERGY_MIN_FACTOR)
+            start_threshold = min(max(ENERGY_THRESHOLD, dynamic_floor), max(ENERGY_THRESHOLD, dynamic_ceiling))
+        continue_threshold = start_threshold * ENERGY_RELEASE_RATIO
+        return start_threshold, continue_threshold
 
     def _high_pass(self, audio: np.ndarray) -> np.ndarray:
         if audio.size == 0:
@@ -195,18 +357,26 @@ class _SpeechFrontEnd:
         vad_prob = self._vad_prob(denoised)
         self._vad_history.append(vad_prob)
         smoothed_prob = float(sum(self._vad_history) / len(self._vad_history))
+        self._update_noise_floor(rms, smoothed_prob)
+        energy_threshold, continue_energy_threshold = self._energy_thresholds()
 
-        start_gate = smoothed_prob >= VAD_START_THRESHOLD and rms >= ENERGY_THRESHOLD
+        start_gate = smoothed_prob >= VAD_START_THRESHOLD and rms >= energy_threshold
         continue_gate = (
             smoothed_prob >= VAD_END_THRESHOLD
-            and rms >= (ENERGY_THRESHOLD * ENERGY_RELEASE_RATIO)
+            and rms >= continue_energy_threshold
         )
 
         if not self._in_speech:
             self._pre_roll.append(denoised.copy())
             self._start_frames = self._start_frames + 1 if start_gate else 0
             if self._start_frames < MIN_SPEECH_START_FRAMES:
-                return _FrontEndDecision(feed_chunks=[], vad_prob=smoothed_prob, rms=rms)
+                return _FrontEndDecision(
+                    feed_chunks=[],
+                    vad_prob=smoothed_prob,
+                    rms=rms,
+                    noise_floor=self._noise_floor,
+                    dynamic_energy_threshold=energy_threshold,
+                )
 
             self._in_speech = True
             self._speech_frames = len(self._pre_roll)
@@ -216,9 +386,12 @@ class _SpeechFrontEnd:
             self._pre_roll.clear()
             return _FrontEndDecision(
                 feed_chunks=feed_chunks,
+                speech_started=True,
                 speech_frames=self._speech_frames,
                 vad_prob=smoothed_prob,
                 rms=rms,
+                noise_floor=self._noise_floor,
+                dynamic_energy_threshold=energy_threshold,
             )
 
         self._speech_frames += 1
@@ -239,6 +412,8 @@ class _SpeechFrontEnd:
             speech_frames=speech_frames,
             vad_prob=smoothed_prob,
             rms=rms,
+            noise_floor=self._noise_floor,
+            dynamic_energy_threshold=energy_threshold,
         )
 
 
@@ -260,6 +435,7 @@ class LocalStreamingASR:
             f"start_threshold={VAD_START_THRESHOLD} | "
             f"end_threshold={VAD_END_THRESHOLD} | "
             f"energy_threshold={ENERGY_THRESHOLD:.4f} | "
+            f"adaptive_energy={ADAPTIVE_ENERGY_ENABLED} | "
             f"max_silence_frames={MAX_SILENCE_FRAMES}"
         )
 
@@ -284,6 +460,7 @@ class LocalStreamingASR:
 
     def process_audio(self, audio: np.ndarray) -> str:
         decision = self.frontend.process_audio(audio)
+        _asr_metrics.observe_frontend(decision)
 
         for chunk in decision.feed_chunks:
             self.stream.accept_waveform(SAMPLE_RATE, chunk)
@@ -301,6 +478,7 @@ class LocalStreamingASR:
             if decision.should_reset:
                 return ""
             if final:
+                _asr_metrics.observe_final(final)
                 print(f"\n[ASR final  ]: {final}")
                 return final
 
@@ -379,6 +557,7 @@ class QwenStreamingASR:
 
     def _reconnect_conversation(self) -> None:
         print("[ASR] Qwen websocket closed, reconnecting...")
+        _asr_metrics.observe_qwen_reconnect()
         try:
             if self._conversation is not None:
                 self._conversation.close()
@@ -388,6 +567,7 @@ class QwenStreamingASR:
 
     def process_audio(self, audio: np.ndarray) -> str:
         decision = self.frontend.process_audio(audio)
+        _asr_metrics.observe_frontend(decision)
         for chunk in decision.feed_chunks:
             pcm = np.clip(chunk, -1.0, 1.0)
             pcm16 = (pcm * 32767).astype(np.int16)
@@ -402,6 +582,7 @@ class QwenStreamingASR:
                 self._conversation.append_audio(audio_b64)
         try:
             final = self._final_queue.get_nowait()
+            _asr_metrics.observe_final(final)
             print(f"\n[ASR final  ]: {final}")
             return final
         except queue.Empty:
@@ -605,6 +786,7 @@ def _asr_worker(asr, stop_event: threading.Event) -> None:
                 if final:
                     _put_latest(_asr_text_q, final, "asr_text")
             except Exception as exc:
+                _asr_metrics.observe_asr_error()
                 print(f"[ASR worker] recoverable error: {exc}", file=sys.stderr)
                 time.sleep(0.2)
         finally:
@@ -647,6 +829,17 @@ def main():
         f"input_latency={AUDIO_INPUT_LATENCY} | audio_queue_max_chunks={AUDIO_QUEUE_MAX_CHUNKS} | "
         f"asr_result_queue_max={ASR_RESULT_QUEUE_MAX} | tts_queue_max={TTS_QUEUE_MAX} | "
         f"mt_target_lang={MT_TARGET_LANG}"
+    )
+    print(
+        "[ASR observability] "
+        f"enabled={ASR_METRICS_ENABLED} | log_interval_sec={max(5, ASR_METRICS_LOG_INTERVAL_SEC)}"
+    )
+    print(
+        "[ASR adaptive energy] "
+        f"enabled={ADAPTIVE_ENERGY_ENABLED} | base_threshold={ENERGY_THRESHOLD:.4f} | "
+        f"release_ratio={ENERGY_RELEASE_RATIO:.2f} | noise_floor_alpha={ADAPTIVE_ENERGY_NOISE_FLOOR_ALPHA:.3f} | "
+        f"min_factor={ADAPTIVE_ENERGY_MIN_FACTOR:.2f} | max_factor={ADAPTIVE_ENERGY_MAX_FACTOR:.2f} | "
+        f"vad_ceiling={ADAPTIVE_ENERGY_VAD_CEILING:.2f}"
     )
 
     if USE_LOCAL_MT:
@@ -696,9 +889,11 @@ def main():
         ):
             while True:
                 time.sleep(0.5)
+                _asr_metrics.maybe_log()
     except KeyboardInterrupt:
         print("\nPipeline stopped.")
     finally:
+        _asr_metrics.maybe_log(force=True)
         stop_event.set()
         for worker in workers:
             worker.join(timeout=1.0)
