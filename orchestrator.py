@@ -15,6 +15,8 @@ import os
 import queue
 import sys
 import threading
+from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
 import requests
@@ -57,13 +59,24 @@ MODEL_PATH = os.path.join(BASE_DIR, "models", "zipformer")
 SAMPLE_RATE = 16000
 FRAME_SIZE = 512
 CHANNELS = 1
+AUDIO_INPUT_LATENCY = os.getenv("ASR_INPUT_LATENCY", "high")
+AUDIO_QUEUE_MAX_CHUNKS = int(os.getenv("ASR_AUDIO_QUEUE_MAX_CHUNKS", "64"))
 
 MT_URL = os.getenv("MT_URL", "http://127.0.0.1:8000/translate")
 MT_SOURCE_LANG = os.getenv("MT_SOURCE_LANG", "zh")
 MT_TARGET_LANG = os.getenv("MT_TARGET_LANG", "en")
 MT_TIMEOUT_SEC = int(os.getenv("MT_TIMEOUT_SEC", "8"))
 
-VAD_THRESHOLD = 0.40
+RNNOISE_FRAME_SIZE = 160
+HPF_ALPHA = 0.97
+VAD_START_THRESHOLD = 0.55
+VAD_END_THRESHOLD = 0.35
+MIN_SPEECH_START_FRAMES = 2
+MIN_SPEECH_FRAMES = 6
+ENERGY_THRESHOLD = 0.008
+ENERGY_RELEASE_RATIO = 0.65
+PRE_SPEECH_FRAMES = 8
+VAD_SMOOTHING_FRAMES = 5
 MAX_SILENCE_FRAMES = 30
 
 LANGUAGE_NAME_MAP = {
@@ -85,6 +98,144 @@ LANGUAGE_NAME_MAP = {
 }
 
 
+@dataclass
+class _FrontEndDecision:
+    feed_chunks: list[np.ndarray]
+    should_finalize: bool = False
+    should_reset: bool = False
+    speech_frames: int = 0
+    vad_prob: float = 0.0
+    rms: float = 0.0
+
+
+class _SpeechFrontEnd:
+    def __init__(self):
+        self.rnnoise = RNNoise(sample_rate=SAMPLE_RATE)
+        self.vad_model, _ = torch.hub.load(
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
+            force_reload=False,
+        )
+        self.vad_model.eval()
+        self._pre_roll: deque[np.ndarray] = deque(maxlen=PRE_SPEECH_FRAMES)
+        self._vad_history: deque[float] = deque(maxlen=VAD_SMOOTHING_FRAMES)
+        self._in_speech = False
+        self._speech_frames = 0
+        self._start_frames = 0
+        self._silence_frames = 0
+        self._hpf_prev_x = 0.0
+        self._hpf_prev_y = 0.0
+
+    def _high_pass(self, audio: np.ndarray) -> np.ndarray:
+        if audio.size == 0:
+            return audio
+
+        filtered = np.empty_like(audio, dtype=np.float32)
+        prev_x = self._hpf_prev_x
+        prev_y = self._hpf_prev_y
+
+        for idx, sample in enumerate(audio.astype(np.float32, copy=False)):
+            current = sample - prev_x + (HPF_ALPHA * prev_y)
+            filtered[idx] = current
+            prev_x = float(sample)
+            prev_y = float(current)
+
+        self._hpf_prev_x = prev_x
+        self._hpf_prev_y = prev_y
+        return np.clip(filtered, -1.0, 1.0)
+
+    def _denoise(self, audio: np.ndarray) -> np.ndarray:
+        if audio.size == 0:
+            return audio
+
+        chunks: list[np.ndarray] = []
+        for start in range(0, len(audio), RNNOISE_FRAME_SIZE):
+            block = audio[start : start + RNNOISE_FRAME_SIZE].astype(np.float32, copy=False)
+            original_len = len(block)
+            if original_len == 0:
+                continue
+            if original_len < RNNOISE_FRAME_SIZE:
+                block = np.pad(block, (0, RNNOISE_FRAME_SIZE - original_len))
+            try:
+                processed = self.rnnoise.process(block)
+                processed_block = processed[0] if isinstance(processed, tuple) else processed
+                chunks.append(np.asarray(processed_block[:original_len], dtype=np.float32))
+            except Exception:
+                chunks.append(block[:original_len].astype(np.float32, copy=False))
+        if not chunks:
+            return np.empty(0, dtype=np.float32)
+        return np.concatenate(chunks, dtype=np.float32)
+
+    def _vad_prob(self, audio: np.ndarray) -> float:
+        tensor = torch.from_numpy(audio.astype(np.float32, copy=False)).unsqueeze(0)
+        with torch.no_grad():
+            return float(self.vad_model(tensor, SAMPLE_RATE).item())
+
+    def _reset_utterance_state(self) -> None:
+        self._pre_roll.clear()
+        self._vad_history.clear()
+        self._in_speech = False
+        self._speech_frames = 0
+        self._start_frames = 0
+        self._silence_frames = 0
+
+    def process_audio(self, audio: np.ndarray) -> _FrontEndDecision:
+        filtered = self._high_pass(audio)
+        denoised = self._denoise(filtered)
+        if denoised.size == 0:
+            return _FrontEndDecision(feed_chunks=[])
+
+        rms = float(np.sqrt(np.mean(np.square(denoised), dtype=np.float32)))
+        vad_prob = self._vad_prob(denoised)
+        self._vad_history.append(vad_prob)
+        smoothed_prob = float(sum(self._vad_history) / len(self._vad_history))
+
+        start_gate = smoothed_prob >= VAD_START_THRESHOLD and rms >= ENERGY_THRESHOLD
+        continue_gate = (
+            smoothed_prob >= VAD_END_THRESHOLD
+            and rms >= (ENERGY_THRESHOLD * ENERGY_RELEASE_RATIO)
+        )
+
+        if not self._in_speech:
+            self._pre_roll.append(denoised.copy())
+            self._start_frames = self._start_frames + 1 if start_gate else 0
+            if self._start_frames < MIN_SPEECH_START_FRAMES:
+                return _FrontEndDecision(feed_chunks=[], vad_prob=smoothed_prob, rms=rms)
+
+            self._in_speech = True
+            self._speech_frames = len(self._pre_roll)
+            self._silence_frames = 0
+            self._start_frames = 0
+            feed_chunks = list(self._pre_roll)
+            self._pre_roll.clear()
+            return _FrontEndDecision(
+                feed_chunks=feed_chunks,
+                speech_frames=self._speech_frames,
+                vad_prob=smoothed_prob,
+                rms=rms,
+            )
+
+        self._speech_frames += 1
+        if continue_gate:
+            self._silence_frames = 0
+        else:
+            self._silence_frames += 1
+
+        should_finalize = self._silence_frames >= MAX_SILENCE_FRAMES
+        speech_frames = self._speech_frames
+        if should_finalize:
+            self._reset_utterance_state()
+
+        return _FrontEndDecision(
+            feed_chunks=[denoised],
+            should_finalize=should_finalize,
+            should_reset=should_finalize and speech_frames < MIN_SPEECH_FRAMES,
+            speech_frames=speech_frames,
+            vad_prob=smoothed_prob,
+            rms=rms,
+        )
+
+
 class LocalStreamingASR:
     def __init__(self):
         tokens_path = os.path.join(MODEL_PATH, "tokens.txt")
@@ -100,7 +251,10 @@ class LocalStreamingASR:
         print(
             "[VAD model] "
             "repo=snakers4/silero-vad | model=silero_vad | "
-            f"threshold={VAD_THRESHOLD} | max_silence_frames={MAX_SILENCE_FRAMES}"
+            f"start_threshold={VAD_START_THRESHOLD} | "
+            f"end_threshold={VAD_END_THRESHOLD} | "
+            f"energy_threshold={ENERGY_THRESHOLD:.4f} | "
+            f"max_silence_frames={MAX_SILENCE_FRAMES}"
         )
 
         self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
@@ -114,59 +268,35 @@ class LocalStreamingASR:
             decoding_method="greedy_search",
         )
         self.stream = self.recognizer.create_stream()
-        self.rnnoise = RNNoise(sample_rate=SAMPLE_RATE)
-        self.vad_model, _ = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad",
-            model="silero_vad",
-            force_reload=False,
-        )
-        self.vad_model.eval()
+        self.frontend = _SpeechFrontEnd()
 
         self.last_text = ""
-        self.silence_frames = 0
-
-    def _denoise(self, audio: np.ndarray) -> np.ndarray:
-        try:
-            chunks = []
-            for i in range(0, 480, 160):
-                res = self.rnnoise.process(audio[i : i + 160])
-                chunks.append(res[0] if isinstance(res, tuple) else res)
-            return np.concatenate(chunks + [audio[480:]]).astype(np.float32)
-        except Exception:
-            return audio
-
-    def _vad_prob(self, audio: np.ndarray) -> float:
-        tensor = torch.from_numpy(audio).unsqueeze(0)
-        with torch.no_grad():
-            return self.vad_model(tensor, SAMPLE_RATE).item()
 
     def _reset(self):
         self.stream = self.recognizer.create_stream()
         self.last_text = ""
-        self.silence_frames = 0
 
     def process_audio(self, audio: np.ndarray) -> str:
-        denoised = self._denoise(audio)
-        voice_prob = self._vad_prob(denoised)
+        decision = self.frontend.process_audio(audio)
 
-        if voice_prob > VAD_THRESHOLD:
-            self.stream.accept_waveform(SAMPLE_RATE, denoised)
-            self.silence_frames = 0
-        else:
-            self.silence_frames += 1
+        for chunk in decision.feed_chunks:
+            self.stream.accept_waveform(SAMPLE_RATE, chunk)
+            while self.recognizer.is_ready(self.stream):
+                self.recognizer.decode_stream(self.stream)
 
-        while self.recognizer.is_ready(self.stream):
-            self.recognizer.decode_stream(self.stream)
+        if decision.feed_chunks:
+            current = self.recognizer.get_result(self.stream).strip()
+            if current and current != self.last_text:
+                self.last_text = current
 
-        current = self.recognizer.get_result(self.stream).strip()
-        if current and current != self.last_text:
-            self.last_text = current
-
-        if self.last_text and self.silence_frames >= MAX_SILENCE_FRAMES:
-            final = self.last_text
-            print(f"\n[ASR final  ]: {final}")
+        if decision.should_finalize:
+            final = self.recognizer.get_result(self.stream).strip() or self.last_text
             self._reset()
-            return final
+            if decision.should_reset:
+                return ""
+            if final:
+                print(f"\n[ASR final  ]: {final}")
+                return final
 
         return ""
 
@@ -209,6 +339,7 @@ class QwenStreamingASR:
         dashscope.api_key = DASHSCOPE_API_KEY
         self._final_queue: queue.Queue[str] = queue.Queue()
         self._callback = _QwenASRCallback(self._final_queue)
+        self.frontend = _SpeechFrontEnd()
         self._conversation = OmniRealtimeConversation(
             model=QWEN_ASR_MODEL,
             url=QWEN_ASR_URL,
@@ -233,10 +364,12 @@ class QwenStreamingASR:
         )
 
     def process_audio(self, audio: np.ndarray) -> str:
-        pcm = np.clip(audio, -1.0, 1.0)
-        pcm16 = (pcm * 32767).astype(np.int16)
-        audio_b64 = base64.b64encode(pcm16.tobytes()).decode("ascii")
-        self._conversation.append_audio(audio_b64)
+        decision = self.frontend.process_audio(audio)
+        for chunk in decision.feed_chunks:
+            pcm = np.clip(chunk, -1.0, 1.0)
+            pcm16 = (pcm * 32767).astype(np.int16)
+            audio_b64 = base64.b64encode(pcm16.tobytes()).decode("ascii")
+            self._conversation.append_audio(audio_b64)
         try:
             final = self._final_queue.get_nowait()
             print(f"\n[ASR final  ]: {final}")
@@ -357,14 +490,37 @@ def translate(text: str) -> str | None:
     return _translate_deepseek(text)
 
 
-_audio_q: queue.Queue[np.ndarray] = queue.Queue()
+_audio_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=AUDIO_QUEUE_MAX_CHUNKS)
 _tts_q: queue.Queue[tuple[str, str]] = queue.Queue()
+_audio_overflow_count = 0
+_audio_drop_count = 0
 
 
 def _audio_callback(indata, frames, time_info, status):
+    global _audio_overflow_count, _audio_drop_count
     if status:
-        print(f"[Audio] {status}", file=sys.stderr)
-    _audio_q.put(indata[:, 0].copy())
+        _audio_overflow_count += 1
+        print(f"[Audio] {status} | overflow_count={_audio_overflow_count}", file=sys.stderr)
+
+    chunk = indata[:, 0].copy()
+    try:
+        _audio_q.put_nowait(chunk)
+    except queue.Full:
+        _audio_drop_count += 1
+        try:
+            _audio_q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            _audio_q.put_nowait(chunk)
+        except queue.Full:
+            pass
+        if _audio_drop_count == 1 or _audio_drop_count % 10 == 0:
+            print(
+                "[Audio] capture queue full, dropping oldest buffered chunk "
+                f"(drop_count={_audio_drop_count})",
+                file=sys.stderr,
+            )
 
 
 def _run_tts(text: str, lang: str) -> None:
@@ -388,6 +544,7 @@ def main():
     print(
         "[Pipeline config] "
         f"audio_sample_rate={SAMPLE_RATE} | frame_size={FRAME_SIZE} | channels={CHANNELS} | "
+        f"input_latency={AUDIO_INPUT_LATENCY} | audio_queue_max_chunks={AUDIO_QUEUE_MAX_CHUNKS} | "
         f"mt_target_lang={MT_TARGET_LANG}"
     )
 
@@ -409,6 +566,7 @@ def main():
             blocksize=FRAME_SIZE,
             channels=CHANNELS,
             dtype="float32",
+            latency=AUDIO_INPUT_LATENCY,
             callback=_audio_callback,
         ):
             while True:

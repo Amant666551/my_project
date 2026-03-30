@@ -24,7 +24,7 @@ sentencepiece==0.2.1
 # TTS
 TTS==0.22.0
 edge-tts==7.2.8
-dashscope
+dashscope==1.25.14
 
 # Infrastructure
 redis==7.3.0

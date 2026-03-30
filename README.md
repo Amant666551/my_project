@@ -1,67 +1,96 @@
 # 实时语音翻译控制台
 
-这是一个实时语音翻译项目，主链路是：
+这是一个实时语音翻译项目，当前主链路为：
 
 `麦克风输入 -> ASR -> MT -> TTS`
 
-当前项目已经支持三段链路都可切换，并且带有一个可视化前端控制台。
-
-当前已经实际跑通的主链路：
+当前已经接通并可运行的常见组合是：
 
 `Qwen ASR -> DeepSeek MT -> Qwen TTS`
 
-## 当前能力
+项目同时保留了本地回退路径：
 
-- ASR 支持：
-  - 远程 `Qwen ASR Realtime`
-  - 本地 `sherpa-onnx zipformer`
-- MT 支持：
-  - 远程 `DeepSeek`
-  - 本地翻译接口
-- TTS 支持：
-  - 远程 `Qwen TTS VC`
-  - 本地 `XTTS`
-- 前端支持：
-  - 展示当前 ASR / MT / TTS 实际路由
-  - 展示当前模型和语言方向
-  - 启动 / 停止 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py)
-  - 查看主管线日志
-  - 直接修改 [`.env`](/C:/Users/30909/Desktop/document/files/.env) 中的翻译方向
+- ASR：本地 `sherpa-onnx zipformer`
+- MT：本地 `/translate` 接口
+- TTS：本地 `XTTS`
+
+项目带有一个前端控制台，可用于查看当前链路、修改语言方向、切换 voice，以及启动/停止主管线。
+
+## 当前代码状态
+
+当前版本以 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 为主控制入口，已经做了以下 ASR 前处理增强：
+
+- 本地高通滤波
+- 本地 `RNNoise` 降噪
+- 本地 `Silero VAD`
+- 平滑后的双阈值 VAD 门控
+- pre-roll 缓冲，减少吞首字
+- 有界音频队列，避免极端情况下无限堆积
+
+当前主管线仍然是单主循环结构：
+
+1. 持续采集音频
+2. 把音频送入 ASR
+3. ASR 出句后同步调用 MT
+4. MT 成功后将文本送入 TTS 队列
+
+这意味着：
+
+- TTS 已经通过线程队列做了串行播放
+- 但 ASR 与 MT 目前仍然串行耦合
+- 在 MT 或其他阶段变慢时，可能看到音频队列积压或 `input overflow`
+
+这属于当前版本的已知结构限制，不影响基本功能可用，但会影响高负载下的实时稳定性。
 
 ## 项目结构
 
 ```text
 files/
-- orchestrator.py          # 主实时管线：ASR -> MT -> TTS
+- orchestrator.py          # 主管线：采音 + ASR + MT 调度 + TTS 投递
 - main.py                  # TTS 后端与播放逻辑
-- api.py                   # 前端服务 + 本地翻译接口 + orchestrator 控制接口
+- api.py                   # 前端服务、控制接口、本地翻译接口
 - translator.py            # 本地翻译模型封装
-- create_qwen_voice.py     # 兼容入口，推荐改用 record_voice.py
-- record_voice.py          # 录音 + 创建 voice + 管理 voice
+- record_voice.py          # 录音、创建 voice、激活 voice
 - web/
   - index.html             # 前端页面
-  - styles.css             # 前端样式
   - app.js                 # 前端交互逻辑
+  - styles.css             # 前端样式
+- clients/
+  - asr_client.py
+  - mt_client.py
+  - tts_client.py
 - models/
   - zipformer/             # 本地 ASR 模型
+  - translate/             # 本地 MT 模型资源
 - voice_samples/
-  - my_voice.wav           # 默认参考音频
+  - voice_registry.json    # voice 注册表
+  - *.wav                  # voice 样本
 - requirements.txt
+- .env
 - README.md
 ```
 
-## 当前默认架构
+## 当前运行架构
 
-从你现在的代码和配置看，常见运行状态是：
+### ASR
 
-- ASR 主路由：`qwen3-asr-flash-realtime-2025-10-27`
-- ASR 回退：`sherpa-onnx zipformer`
-- MT 主路由：`deepseek-chat`
-- MT 可选本地路由：`/translate`
-- TTS 主路由：`qwen3-tts-vc-2026-01-22`
-- TTS 回退：`XTTS v2`
-- VAD：`Silero VAD`
-- 降噪：`RNNoise`
+- 主路由：`Qwen ASR Realtime`
+- 回退：`sherpa-onnx zipformer`
+- 前处理：
+  - 高通滤波
+  - `RNNoise`
+  - `Silero VAD`
+  - 起说/停说双阈值门控
+
+### MT
+
+- 主路由：`DeepSeek`
+- 可切换到本地翻译接口：`/translate`
+
+### TTS
+
+- 主路由：`Qwen TTS VC`
+- 回退：`XTTS`
 
 ## 运行方式
 
@@ -77,53 +106,74 @@ uvicorn api:app --host 127.0.0.1 --port 8000
 http://127.0.0.1:8000/
 ```
 
-前端页面现在可以：
+前端可用于：
 
-- 查看当前路由和模型
+- 查看当前 ASR / MT / TTS 路由
+- 查看当前模型和语言方向
 - 启动主管线
 - 停止主管线
 - 查看主管线日志
 - 修改语言方向
 - 测试本地翻译接口
+- 切换当前 voice
 
 ### 2. 直接启动主管线
-
-如果你不通过前端，也可以直接跑：
 
 ```powershell
 python orchestrator.py
 ```
 
-## 前端和后端的职责
+## 各主要文件职责
 
 ### `orchestrator.py`
 
-负责真正的主业务链路：
+负责实时主链路：
 
-- 麦克风采集
+- 麦克风输入
+- 本地前处理
 - ASR
 - MT
-- TTS
+- 投递到 TTS 队列
+
+当前 TTS 已经单独走工作线程，避免一条语音播放时打断另一条语音播放。
+
+### `main.py`
+
+负责 TTS：
+
+- 优先尝试 `Qwen TTS API`
+- 失败时回退到本地后端
+- 当前本地回退默认是 `XTTS`
 
 ### `api.py`
 
 负责控制台和辅助接口：
 
-- 提供前端页面
-- 提供 `/health`
-- 提供 `/api/stack`
-- 提供 `/api/pipeline/start`
-- 提供 `/api/pipeline/stop`
-- 提供 `/api/pipeline/status`
-- 提供 `/api/config/languages`
-- 提供 `/translate`
+- `/health`
+- `/api/stack`
+- `/api/pipeline/start`
+- `/api/pipeline/stop`
+- `/api/pipeline/status`
+- `/api/config/languages`
+- `/api/voices`
+- `/api/voices/activate`
+- `/translate`
 
 注意：
 
-- 前端里的 `/translate` 只用于测试本地翻译接口
-- 主实时链路中的翻译仍由 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 控制
+- `/translate` 只用于本地翻译接口测试或本地 MT 路由
+- 主管线中的翻译调度仍由 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 控制
 
-## 环境变量
+### `record_voice.py`
+
+负责 voice 管理：
+
+- 录音
+- 调用 Qwen voice 创建接口
+- 将 voice 写入 `voice_registry.json`
+- 激活指定 voice 并回写 `.env`
+
+## 当前关键环境变量
 
 ### ASR
 
@@ -136,7 +186,7 @@ QWEN_ASR_LANGUAGE=zh
 
 ### MT
 
-远程 DeepSeek：
+远程 MT：
 
 ```env
 DEEPSEEK_API_KEY=your_key
@@ -145,7 +195,7 @@ DEEPSEEK_MODEL=deepseek-chat
 USE_LOCAL_MT=false
 ```
 
-本地翻译接口：
+本地 MT：
 
 ```env
 USE_LOCAL_MT=true
@@ -163,87 +213,59 @@ USE_QWEN_TTS_API=true
 QWEN_TTS_MODEL=qwen3-tts-vc-2026-01-22
 QWEN_TTS_VOICE=your_voice_id
 QWEN_TTS_BASE_HTTP_API_URL=https://dashscope.aliyuncs.com/api/v1
+VOICE_SAMPLE=voice_samples/voice_001.wav
 ```
 
-### 本地 TTS 回退
+### 当前 ASR 采音相关默认值
 
-```env
-TTS_BACKEND=xtts
-VOICE_SAMPLE=voice_samples/my_voice.wav
+这些值现在由 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 控制：
+
+```text
+SAMPLE_RATE=16000
+FRAME_SIZE=512
+CHANNELS=1
+ASR_INPUT_LATENCY=high
+ASR_AUDIO_QUEUE_MAX_CHUNKS=64
 ```
 
-## 运行时切换逻辑
+### 当前 ASR 前处理门控参数
 
-### ASR
-
-通过：
-
-```env
-USE_QWEN_ASR_API=true
+```text
+RNNOISE_FRAME_SIZE=160
+HPF_ALPHA=0.97
+VAD_START_THRESHOLD=0.55
+VAD_END_THRESHOLD=0.35
+MIN_SPEECH_START_FRAMES=2
+MIN_SPEECH_FRAMES=6
+ENERGY_THRESHOLD=0.008
+ENERGY_RELEASE_RATIO=0.65
+PRE_SPEECH_FRAMES=8
+VAD_SMOOTHING_FRAMES=5
+MAX_SILENCE_FRAMES=30
 ```
 
-控制：
-
-- `true`：优先走 Qwen ASR
-- 初始化失败时回退本地 `zipformer`
-- `false`：直接走本地 `zipformer`
-
-### MT
-
-通过：
-
-```env
-USE_LOCAL_MT=false
-```
-
-控制：
-
-- `false`：走 DeepSeek
-- `true`：走本地翻译接口
-
-### TTS
-
-通过：
-
-```env
-USE_QWEN_TTS_API=true
-```
-
-控制：
-
-- `true`：优先走 Qwen TTS
-- 失败时回退 XTTS
-- `false`：直接走本地 TTS
+这些参数是当前针对“减少误触发，同时尽量避免吞首字”调过的一组默认值。
 
 ## 语言方向设置
 
-当前项目里，语言方向主要由这些变量控制：
+当前语言方向主要由以下变量控制：
 
 - `QWEN_ASR_LANGUAGE`
 - `MT_SOURCE_LANG`
 - `MT_TARGET_LANG`
 
-### 现在的绑定关系
-
-前端保存语言方向时，会自动把下面两项绑定成一致：
+前端保存语言方向时会同时更新：
 
 - `QWEN_ASR_LANGUAGE`
 - `MT_SOURCE_LANG`
 
-也就是说：
-
-- 如果你在前端把源语言设成 `en`
-- 保存后 [`.env`](/C:/Users/30909/Desktop/document/files/.env) 会同时更新：
-  - `QWEN_ASR_LANGUAGE=en`
-  - `MT_SOURCE_LANG=en`
-
-目标语言则写入：
+目标语言写入：
 
 - `MT_TARGET_LANG`
 
-### 常见语言组合
+常见组合：
 
-#### 中文 -> 英文
+### 中文 -> 英文
 
 ```env
 QWEN_ASR_LANGUAGE=zh
@@ -251,7 +273,7 @@ MT_SOURCE_LANG=zh
 MT_TARGET_LANG=en
 ```
 
-#### 英文 -> 中文
+### 英文 -> 中文
 
 ```env
 QWEN_ASR_LANGUAGE=en
@@ -259,7 +281,7 @@ MT_SOURCE_LANG=en
 MT_TARGET_LANG=zh
 ```
 
-#### 中文 -> 中文
+### 中文 -> 中文
 
 ```env
 QWEN_ASR_LANGUAGE=zh
@@ -267,221 +289,91 @@ MT_SOURCE_LANG=zh
 MT_TARGET_LANG=zh
 ```
 
-这个更像“转写 + 同语种播报”。
+## Voice 管理
 
-## 所有主要可调参数
-
-### `orchestrator.py`
-
-ASR / 音频输入：
-
-- `USE_QWEN_ASR_API`
-- `QWEN_ASR_MODEL`
-- `QWEN_ASR_URL`
-- `QWEN_ASR_LANGUAGE`
-- `SAMPLE_RATE`
-- `FRAME_SIZE`
-- `CHANNELS`
-- `VAD_THRESHOLD`
-- `MAX_SILENCE_FRAMES`
-
-MT：
-
-- `USE_LOCAL_MT`
-- `MT_URL`
-- `MT_SOURCE_LANG`
-- `MT_TARGET_LANG`
-- `MT_TIMEOUT_SEC`
-- `DEEPSEEK_BASE_URL`
-- `DEEPSEEK_MODEL`
-
-说明：
-
-- `SAMPLE_RATE`
-  当前是 `16000`
-- `FRAME_SIZE`
-  当前是 `512`
-- `VAD_THRESHOLD`
-  越高越严格
-- `MAX_SILENCE_FRAMES`
-  越大越晚断句
-
-### `main.py`
-
-远程 TTS：
-
-- `USE_QWEN_TTS_API`
-- `QWEN_TTS_MODEL`
-- `QWEN_TTS_VOICE`
-- `QWEN_TTS_BASE_HTTP_API_URL`
-- `DASHSCOPE_API_KEY`
-
-本地 TTS：
-
-- `TTS_BACKEND`
-- `VOICE_SAMPLE`
-- `PROXY`
-
-XTTS 参数：
-
-- `XTTS_TEMPERATURE`
-- `XTTS_SPEED`
-- `XTTS_REPETITION_PENALTY`
-- `XTTS_LENGTH_PENALTY`
-- `XTTS_TOP_K`
-- `XTTS_TOP_P`
-- `XTTS_STREAM_CHUNK_SIZE`
-- `XTTS_STREAMING_MODE`
-- `XTTS_STREAM_PREROLL_CHUNKS`
-
-通用重试：
-
-- `RETRY_COUNT`
-- `RETRY_DELAY`
-
-### `api.py`
-
-控制台和本地翻译接口相关：
-
-- `MT_SOURCE_LANG`
-- `MT_TARGET_LANG`
-- `USE_QWEN_ASR_API`
-- `USE_LOCAL_MT`
-- `USE_QWEN_TTS_API`
-- `QWEN_ASR_MODEL`
-- `DEEPSEEK_MODEL`
-- `QWEN_TTS_MODEL`
-- `QWEN_TTS_VOICE`
-
-## 录音、创建 Voice、切换 Voice
-
-现在推荐统一使用：
+推荐统一使用：
 
 [`record_voice.py`](/C:/Users/30909/Desktop/document/files/record_voice.py)
 
-### 1. 一步完成录音 + 创建 voice + 激活
-
-直接运行：
+### 录音并创建新的 voice
 
 ```powershell
 python record_voice.py
 ```
 
-它会自动完成：
-
-- 录一段新的参考音频
-- 按顺序保存到 [`voice_samples`](/C:/Users/30909/Desktop/document/files/voice_samples)
-  目录，例如：
-  - `voice_001.wav`
-  - `voice_002.wav`
-- 调用 Qwen voice 创建接口
-- 把结果记录到：
-  [`voice_samples/voice_registry.json`](/C:/Users/30909/Desktop/document/files/voice_samples/voice_registry.json)
-- 自动更新 [`.env`](/C:/Users/30909/Desktop/document/files/.env) 中的：
-  - `QWEN_TTS_VOICE`
-  - `QWEN_TTS_VOICE_SAMPLE`
-  - `VOICE_SAMPLE`
-
-### 2. 查看已有 voice
+### 查看已有 voice
 
 ```powershell
 python record_voice.py --list
 ```
 
-### 3. 手动切换当前使用的 voice
+### 激活指定 voice
 
 ```powershell
 python record_voice.py --activate 2
 ```
 
-这会把第 2 个已保存 voice 激活，并同步更新 [`.env`](/C:/Users/30909/Desktop/document/files/.env)。
+激活后会同步更新 `.env` 中的：
 
-## 重要日志怎么看
+- `QWEN_TTS_VOICE`
+- `QWEN_TTS_VOICE_SAMPLE`
+- `VOICE_SAMPLE`
 
-启动时建议重点看这些：
+## 启动后建议关注的日志
 
+启动时：
+
+- `[Pipeline config] ...`
 - `[MT model ] provider=deepseek | model=deepseek-chat`
 - 或 `[MT model ] provider=local_api | url=...`
-- `[ASR model] provider=qwen_api | model=qwen3-asr-flash-realtime-2025-10-27 | language=...`
+- `[ASR model] provider=qwen_api | model=... | language=...`
 - 或 `[ASR model] provider=sherpa-onnx | model_path=...`
 - `[ASR route] primary=qwen_api | fallback=zipformer`
 - 或 `[ASR route] primary=zipformer`
-- `[TTS] INFO    TTS primary model | provider=qwen_api | model=qwen3-tts-vc-2026-01-22 | voice_configured=True`
+- `[TTS] INFO    TTS primary model | provider=qwen_api | model=...`
 - `[TTS] INFO    TTS fallback model | provider=xtts | model=xtts_v2 | device=...`
-- `[TTS] INFO    TTS startup | primary=qwen_api | fallback=xtts`
 
-运行中建议看：
+运行中：
 
 - `[ASR final  ]: ...`
 - `[MT  ]: ...`
-- `[TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22`
+- `[TTS] INFO    TTS provider | provider=qwen_api | model=...`
+- `[Audio] input overflow | ...`
+- `[Audio] capture queue full, dropping oldest buffered chunk ...`
 
-如果 Qwen TTS 回退，会看到：
+其中最后两类日志表示当前实时链路存在采音积压。
+
+## 当前已知问题
+
+### 1. 主管线仍然是串行主循环
+
+当前版本下，ASR 出句后 MT 仍在主管线中同步执行，因此在网络抖动、翻译变慢或后续处理变慢时，可能造成：
+
+- `_audio_q` 积压
+- 音频块丢弃
+- `input overflow`
+
+### 2. Qwen TTS 可能偶发超时
+
+日志中如果出现：
 
 ```text
-Qwen TTS API failed, falling back to local backend.
+Qwen TTS synthesis failed: ... Read timed out
 ```
 
-## 常见问题
+则会自动回退到本地 TTS。
 
-### 1. 前端能启动主管线吗？
+### 3. 当前 README 以现有代码为准
 
-可以。  
-前端现在通过：
-
-- `/api/pipeline/start`
-- `/api/pipeline/stop`
-- `/api/pipeline/status`
-
-来控制 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py)。
-
-### 2. 为什么前端里 `/translate` 和主链路不一样？
-
-因为：
-
-- `/translate` 是本地翻译接口测试台
-- 主链路翻译逻辑仍然在 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 里
-
-### 3. 为什么改了源语言但识别还有时不稳定？
-
-因为 `QWEN_ASR_LANGUAGE` 更像偏好提示，不一定是绝对锁定。  
-所以如果设置成英文识别，但实际说中文，ASR 仍然可能识别出中文。
-
-## 故障排查
-
-### Qwen ASR 没有生效
-
-检查：
-
-- `USE_QWEN_ASR_API=true`
-- `DASHSCOPE_API_KEY` 是否存在
-- `QWEN_ASR_MODEL` 是否正确
-- 网络是否能访问 DashScope
-
-### 本地 MT 没有生效
-
-检查：
-
-- `USE_LOCAL_MT=true`
-- [`api.py`](/C:/Users/30909/Desktop/document/files/api.py) 是否已经启动
-- `MT_URL` 是否正确
-
-### Qwen TTS 没有生效
-
-检查：
-
-- `USE_QWEN_TTS_API=true`
-- `DASHSCOPE_API_KEY` 是否存在
-- `QWEN_TTS_VOICE` 是否存在
-- `QWEN_TTS_MODEL` 是否与 voice 创建时一致
+如果后续我们继续把主管线拆成真正的异步流水线，README 也需要同步更新。
 
 ## 安全说明
 
-不要提交这些内容：
+不要提交以下内容：
 
 - `.env`
 - `models/`
 - `voice_samples/`
 - `.venv310/`
 
-另外请确认你对参考音频拥有合法使用权限。
+另外请确保你对参考音频拥有合法使用权限。
