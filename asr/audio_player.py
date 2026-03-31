@@ -9,22 +9,19 @@ from pathlib import Path
 import sounddevice as sd
 import soundfile as sf
 
+from app_logging import get_logger
 from .playback_bus import playback_bus
 
 
 PLAYER_CHUNK_SIZE = int(os.getenv("AEC_PLAYER_CHUNK_SIZE", "1024"))
+log = get_logger("AudioPlayer")
 
 
 def _log(logger, level: str, message: str, *args) -> None:
     if logger is not None and hasattr(logger, level):
         getattr(logger, level)(message, *args)
         return
-    if args:
-        try:
-            message = message % args
-        except Exception:
-            message = f"{message} {' '.join(map(str, args))}"
-    print(message)
+    getattr(log, level)(message, *args)
 
 
 def play_audio_file(path: str, logger=None) -> None:

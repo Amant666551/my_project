@@ -1,0 +1,74 @@
+17:07:58 [ASR] WARNING Qwen ASR unavailable, fallback to local zipformer: Remote end closed connection without response
+17:18:59 [ASR] WARNING Qwen ASR unavailable, fallback to local zipformer: Remote end closed connection without response
+17:45:31 [pipeline.BOOT] INFO    startup | importing TTS module
+17:45:32 [pipeline.TTS] INFO    startup | configuring TTS backends
+17:45:32 [pipeline.TTS] INFO    startup | loading fallback backend=xtts
+17:46:32 [pipeline.TTS] INFO    TTS fallback model | provider=xtts | model=xtts_v2 | device=cpu
+17:46:35 [pipeline.TTS] INFO    startup | loading primary backend=qwen_api
+17:46:35 [pipeline.TTS] INFO    TTS primary model | provider=qwen_api | model=qwen3-tts-vc-2026-01-22 | voice_configured=True
+17:46:35 [pipeline.TTS] INFO    TTS startup | primary=qwen_api | fallback=xtts
+17:46:35 [pipeline.BOOT] INFO    startup | TTS module imported
+17:46:35 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+17:46:35 [pipeline.PIPELINE] INFO    config | audio_sample_rate=16000 | frame_size=512 | channels=1 | input_latency=high | audio_queue_max_chunks=64 | asr_result_queue_max=16 | tts_queue_max=16 | mt_target_lang=en
+17:46:35 [pipeline.PIPELINE] INFO    logs | file=logs\pipeline.log
+17:46:35 [pipeline.ASR] INFO    observability | enabled=True | log_interval_sec=30
+17:46:35 [pipeline.ASR.HOTWORD] INFO    [ASR hotwords] enabled=False | entries=0 | aliases=0 | pinyin_enabled=False | pinyin_entries=0 | max_replacements=2 | file=hotwords.json
+17:46:35 [pipeline.ASR] INFO    adaptive_energy | enabled=True | base_threshold=0.0080 | release_ratio=0.65 | noise_floor_alpha=0.020 | min_factor=1.80 | max_factor=3.00 | vad_ceiling=0.12
+17:46:35 [pipeline.MT] INFO    model | provider=deepseek | model=deepseek-chat
+17:46:35 [pipeline.AEC] INFO    [AEC] | enabled=False | requested=pyaec | active=passthrough | sample_rate=16000 | frame_size=512 | delay_ms=120
+17:46:36 [pipeline.ASR] INFO    model | provider=qwen_api | model=qwen3-asr-flash-realtime-2025-10-27 | language=zh
+17:46:36 [pipeline.ASR] INFO    route | primary=qwen_api | fallback=zipformer
+17:46:36 [pipeline.PIPELINE] INFO    System ready - start speaking!
+17:46:44 [pipeline.ASR] INFO    final | text=啥玩意儿。
+17:46:45 [pipeline.MT] INFO    result | text=What the heck.
+17:46:46 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+17:47:05 [pipeline.ASR.METRICS] INFO    window=30.3s | frontend_frames=880 | speech_starts=1 | finals=1 | finalizes=1 | short_resets=0 | feed_decisions=46 | feed_chunks=53 | avg_vad=0.037 | avg_rms=0.0018 | avg_noise_floor=0.0010 | avg_dynamic_threshold=0.0081 | avg_utt_ms=1696 | avg_final_chars=5.0 | hotword_rewrites=0 | audio_overflows=0 | audio_drops=0 | asr_text_drops=0 | tts_drops=0 | qwen_reconnects=0 | asr_errors=0
+17:47:12 [pipeline.PIPELINE] INFO    Pipeline stopped.
+17:47:12 [pipeline.ASR.METRICS] INFO    window=6.3s | frontend_frames=191 | speech_starts=0 | finals=0 | finalizes=0 | short_resets=0 | feed_decisions=0 | feed_chunks=0 | avg_vad=0.000 | avg_rms=0.0000 | avg_noise_floor=0.0000 | avg_dynamic_threshold=0.0080 | avg_utt_ms=0 | avg_final_chars=0.0 | hotword_rewrites=0 | audio_overflows=0 | audio_drops=0 | asr_text_drops=0 | tts_drops=0 | qwen_reconnects=0 | asr_errors=0
+18:11:07 [pipeline.BOOT] INFO    startup | importing TTS module
+18:11:07 [pipeline.TTS] INFO    startup | configuring TTS backends
+18:11:07 [pipeline.TTS] INFO    startup | loading fallback backend=xtts
+18:11:54 [pipeline.TTS] INFO    XTTS setup | > tts_models/multilingual/multi-dataset/xtts_v2 is already downloaded.
+18:12:08 [pipeline.TTS] INFO    TTS fallback model | provider=xtts | model=xtts_v2 | device=cpu
+18:12:10 [pipeline.TTS] INFO    startup | loading primary backend=qwen_api
+18:12:11 [pipeline.TTS] INFO    TTS primary model | provider=qwen_api | model=qwen3-tts-vc-2026-01-22 | voice_configured=True
+18:12:11 [pipeline.TTS] INFO    TTS startup | primary=qwen_api | fallback=xtts
+18:12:11 [pipeline.BOOT] INFO    startup | TTS module imported
+18:12:11 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+18:12:11 [pipeline.PIPELINE] INFO    config | audio_sample_rate=16000 | frame_size=512 | channels=1 | input_latency=high | audio_queue_max_chunks=64 | asr_result_queue_max=16 | tts_queue_max=16 | mt_target_lang=en
+18:12:11 [pipeline.PIPELINE] INFO    logs | file=logs\pipeline.log
+18:12:11 [pipeline.ASR] INFO    observability | enabled=True | log_interval_sec=30
+18:12:11 [pipeline.ASR.HOTWORD] INFO    [ASR hotwords] enabled=False | entries=0 | aliases=0 | pinyin_enabled=False | pinyin_entries=0 | max_replacements=2 | file=hotwords.json
+18:12:11 [pipeline.ASR] INFO    adaptive_energy | enabled=True | base_threshold=0.0080 | release_ratio=0.65 | noise_floor_alpha=0.020 | min_factor=1.80 | max_factor=3.00 | vad_ceiling=0.12
+18:12:11 [pipeline.MT] INFO    model | provider=deepseek | model=deepseek-chat
+18:12:11 [pipeline.AEC] INFO    [AEC] | enabled=False | requested=pyaec | active=passthrough | sample_rate=16000 | frame_size=512 | delay_ms=120
+18:12:11 [pipeline.ASR] INFO    model | provider=qwen_api | model=qwen3-asr-flash-realtime-2025-10-27 | language=zh
+18:12:11 [pipeline.ASR] INFO    route | primary=qwen_api | fallback=zipformer
+18:12:11 [pipeline.PIPELINE] INFO    System ready - start speaking!
+18:12:41 [pipeline.ASR.METRICS] INFO    window=30.3s | frontend_frames=901 | speech_starts=0 | finals=0 | finalizes=0 | short_resets=0 | feed_decisions=0 | feed_chunks=0 | avg_vad=0.003 | avg_rms=0.0000 | avg_noise_floor=0.0004 | avg_dynamic_threshold=0.0081 | avg_utt_ms=0 | avg_final_chars=0.0 | hotword_rewrites=0 | audio_overflows=0 | audio_drops=0 | asr_text_drops=0 | tts_drops=0 | qwen_reconnects=0 | asr_errors=0
+18:13:11 [pipeline.ASR.METRICS] INFO    window=30.4s | frontend_frames=949 | speech_starts=0 | finals=0 | finalizes=0 | short_resets=0 | feed_decisions=0 | feed_chunks=0 | avg_vad=0.008 | avg_rms=0.0001 | avg_noise_floor=0.0000 | avg_dynamic_threshold=0.0080 | avg_utt_ms=0 | avg_final_chars=0.0 | hotword_rewrites=0 | audio_overflows=0 | audio_drops=0 | asr_text_drops=0 | tts_drops=0 | qwen_reconnects=0 | asr_errors=0
+18:13:42 [pipeline.ASR.METRICS] INFO    window=30.4s | frontend_frames=951 | speech_starts=0 | finals=0 | finalizes=0 | short_resets=0 | feed_decisions=0 | feed_chunks=0 | avg_vad=0.002 | avg_rms=0.0000 | avg_noise_floor=0.0000 | avg_dynamic_threshold=0.0080 | avg_utt_ms=0 | avg_final_chars=0.0 | hotword_rewrites=0 | audio_overflows=0 | audio_drops=0 | asr_text_drops=0 | tts_drops=0 | qwen_reconnects=0 | asr_errors=0
+18:14:12 [pipeline.ASR.METRICS] INFO    window=30.4s | frontend_frames=949 | speech_starts=0 | finals=0 | finalizes=0 | short_resets=0 | feed_decisions=0 | feed_chunks=0 | avg_vad=0.002 | avg_rms=0.0000 | avg_noise_floor=0.0000 | avg_dynamic_threshold=0.0080 | avg_utt_ms=0 | avg_final_chars=0.0 | hotword_rewrites=0 | audio_overflows=0 | audio_drops=0 | asr_text_drops=0 | tts_drops=0 | qwen_reconnects=0 | asr_errors=0
+18:14:43 [pipeline.ASR.METRICS] INFO    window=30.5s | frontend_frames=953 | speech_starts=0 | finals=0 | finalizes=0 | short_resets=0 | feed_decisions=0 | feed_chunks=0 | avg_vad=0.002 | avg_rms=0.0000 | avg_noise_floor=0.0000 | avg_dynamic_threshold=0.0080 | avg_utt_ms=0 | avg_final_chars=0.0 | hotword_rewrites=0 | audio_overflows=0 | audio_drops=0 | asr_text_drops=0 | tts_drops=0 | qwen_reconnects=0 | asr_errors=0
+18:15:13 [pipeline.ASR.METRICS] INFO    window=30.4s | frontend_frames=949 | speech_starts=0 | finals=0 | finalizes=0 | short_resets=0 | feed_decisions=0 | feed_chunks=0 | avg_vad=0.003 | avg_rms=0.0000 | avg_noise_floor=0.0000 | avg_dynamic_threshold=0.0080 | avg_utt_ms=0 | avg_final_chars=0.0 | hotword_rewrites=0 | audio_overflows=0 | audio_drops=0 | asr_text_drops=0 | tts_drops=0 | qwen_reconnects=0 | asr_errors=0
+18:15:16 [pipeline.ASR] INFO    final | text=嗯。
+18:15:18 [pipeline.MT] INFO    result | text=Hmm.
+18:15:19 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+18:15:22 [pipeline.ASR] INFO    final | text=嗯。
+18:15:24 [pipeline.MT] INFO    result | text=Hmm.
+18:15:25 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+18:15:43 [pipeline.ASR.METRICS] INFO    window=30.4s | frontend_frames=903 | speech_starts=2 | finals=2 | finalizes=2 | short_resets=0 | feed_decisions=75 | feed_chunks=89 | avg_vad=0.024 | avg_rms=0.0005 | avg_noise_floor=0.0000 | avg_dynamic_threshold=0.0080 | avg_utt_ms=1424 | avg_final_chars=2.0 | hotword_rewrites=0 | audio_overflows=0 | audio_drops=0 | asr_text_drops=0 | tts_drops=0 | qwen_reconnects=0 | asr_errors=0
+18:15:59 [pipeline.PIPELINE] INFO    Pipeline stopped.
+18:15:59 [pipeline.ASR.METRICS] INFO    window=15.8s | frontend_frames=489 | speech_starts=0 | finals=0 | finalizes=0 | short_resets=0 | feed_decisions=0 | feed_chunks=0 | avg_vad=0.003 | avg_rms=0.0000 | avg_noise_floor=0.0000 | avg_dynamic_threshold=0.0080 | avg_utt_ms=0 | avg_final_chars=0.0 | hotword_rewrites=0 | audio_overflows=0 | audio_drops=0 | asr_text_drops=0 | tts_drops=0 | qwen_reconnects=0 | asr_errors=0
+20:02:59 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+20:03:01 [pipeline.PIPELINE] INFO    System ready - start speaking!
+20:03:03 [pipeline.ASR] INFO    final | text=特别严厉。
+20:03:05 [pipeline.MT] INFO    result | text=Extremely strict.
+20:03:06 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+20:03:11 [pipeline.ASR] INFO    final | text=哎，高德纳，我靠，那个那个中文名字非常搞笑。
+20:03:13 [pipeline.MT] INFO    result | text=Hey, Knuth, damn, that Chinese name is really hilarious.
+20:03:15 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+20:03:32 [pipeline.ASR] INFO    final | text=还有这种事，我非常喜欢这个评论。
+20:03:34 [pipeline.MT] INFO    result | text=There's such a thing, I really like this comment.
+20:03:35 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+20:04:39 [pipeline.PIPELINE] INFO    Pipeline stopped.

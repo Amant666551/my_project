@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from app_logging import get_logger
+
+
+log = get_logger("ASR.HOTWORD")
+
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -137,11 +142,11 @@ class HotwordManager:
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except Exception as exc:
-            print(f"[ASR hotwords] failed to load {self.path}: {exc}")
+            log.warning("failed to load %s: %s", self.path, exc)
             return
 
         if not isinstance(payload, list):
-            print(f"[ASR hotwords] ignored {self.path}: root must be a JSON list")
+            log.warning("ignored %s: root must be a JSON list", self.path)
             return
 
         rules: list[_HotwordRule] = []

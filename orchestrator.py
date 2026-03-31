@@ -27,11 +27,19 @@ import torch
 from dotenv import load_dotenv
 from pyrnnoise import RNNoise
 
+from app_logging import configure_logging, default_log_path, get_logger
 from asr.aec import EchoCanceller
 from asr.hotword_manager import HotwordManager
-from main import speak as tts_speak
 
 load_dotenv()
+configure_logging()
+
+bootstrap_log = get_logger("BOOT")
+bootstrap_log.info("startup | importing TTS module")
+
+from main import speak as tts_speak
+
+bootstrap_log.info("startup | TTS module imported")
 
 
 USE_LOCAL_MT = os.getenv("USE_LOCAL_MT", "false").lower() == "true"
@@ -108,6 +116,14 @@ LANGUAGE_NAME_MAP = {
     "th": "Thai",
     "vi": "Vietnamese",
 }
+
+pipeline_log = get_logger("PIPELINE")
+asr_log = get_logger("ASR")
+mt_log = get_logger("MT")
+audio_log = get_logger("Audio")
+queue_log = get_logger("Queue")
+metrics_log = get_logger("ASR.METRICS")
+hotword_log = get_logger("ASR.HOTWORD")
 
 
 class _ASRMetrics:
@@ -229,19 +245,34 @@ class _ASRMetrics:
         )
         avg_final_chars = snapshot["final_char_sum"] / final_count if snapshot["final_count"] else 0.0
 
-        print(
-            "[ASR metrics] "
-            f"window={snapshot['window_sec']:.1f}s | frontend_frames={snapshot['frontend_frames']} | "
-            f"speech_starts={snapshot['speech_start_count']} | finals={snapshot['final_count']} | "
-            f"finalizes={snapshot['finalize_count']} | short_resets={snapshot['short_reset_count']} | "
-            f"feed_decisions={snapshot['feed_decisions']} | feed_chunks={snapshot['feed_chunks']} | "
-            f"avg_vad={avg_vad:.3f} | avg_rms={avg_rms:.4f} | avg_noise_floor={avg_noise_floor:.4f} | "
-            f"avg_dynamic_threshold={avg_dynamic_threshold:.4f} | avg_utt_ms={avg_utt_ms:.0f} | "
-            f"avg_final_chars={avg_final_chars:.1f} | hotword_rewrites={snapshot['hotword_rewrite_count']} | "
-            f"audio_overflows={_audio_overflow_count} | "
-            f"audio_drops={_audio_drop_count} | asr_text_drops={_queue_drop_counts['asr_text']} | "
-            f"tts_drops={_queue_drop_counts['tts']} | qwen_reconnects={snapshot['qwen_reconnect_count']} | "
-            f"asr_errors={snapshot['asr_error_count']}"
+        metrics_log.info(
+            "window=%.1fs | frontend_frames=%s | speech_starts=%s | finals=%s | "
+            "finalizes=%s | short_resets=%s | feed_decisions=%s | feed_chunks=%s | "
+            "avg_vad=%.3f | avg_rms=%.4f | avg_noise_floor=%.4f | avg_dynamic_threshold=%.4f | "
+            "avg_utt_ms=%.0f | avg_final_chars=%.1f | hotword_rewrites=%s | "
+            "audio_overflows=%s | audio_drops=%s | asr_text_drops=%s | tts_drops=%s | "
+            "qwen_reconnects=%s | asr_errors=%s",
+            snapshot["window_sec"],
+            snapshot["frontend_frames"],
+            snapshot["speech_start_count"],
+            snapshot["final_count"],
+            snapshot["finalize_count"],
+            snapshot["short_reset_count"],
+            snapshot["feed_decisions"],
+            snapshot["feed_chunks"],
+            avg_vad,
+            avg_rms,
+            avg_noise_floor,
+            avg_dynamic_threshold,
+            avg_utt_ms,
+            avg_final_chars,
+            snapshot["hotword_rewrite_count"],
+            _audio_overflow_count,
+            _audio_drop_count,
+            _queue_drop_counts["asr_text"],
+            _queue_drop_counts["tts"],
+            snapshot["qwen_reconnect_count"],
+            snapshot["asr_error_count"],
         )
 
 
@@ -256,10 +287,7 @@ def _postprocess_asr_final(text: str) -> str:
 
     _asr_metrics.observe_hotword_rewrite()
     hits_desc = ", ".join(f"{alias}->{canonical}" for alias, canonical in hits)
-    print(
-        "[ASR hotword] "
-        f"matches={hits_desc} | original={text} | rewritten={rewritten}"
-    )
+    hotword_log.info("matches=%s | original=%s | rewritten=%s", hits_desc, text, rewritten)
     return rewritten
 
 
@@ -279,12 +307,13 @@ class _FrontEndDecision:
 class _SpeechFrontEnd:
     def __init__(self):
         self.echo_canceller = EchoCanceller(frame_size=FRAME_SIZE, sample_rate=SAMPLE_RATE)
-        print(self.echo_canceller.describe())
+        get_logger("AEC").info(self.echo_canceller.describe())
         self.rnnoise = RNNoise(sample_rate=SAMPLE_RATE)
         self.vad_model, _ = torch.hub.load(
             repo_or_dir="snakers4/silero-vad",
             model="silero_vad",
             force_reload=False,
+            verbose=False,
         )
         self.vad_model.eval()
         self._pre_roll: deque[np.ndarray] = deque(maxlen=PRE_SPEECH_FRAMES)
@@ -449,19 +478,18 @@ class LocalStreamingASR:
         decoder_path = os.path.join(MODEL_PATH, "decoder-epoch-99-avg-1.onnx")
         joiner_path = os.path.join(MODEL_PATH, "joiner-epoch-99-avg-1.int8.onnx")
 
-        print(
-            "[ASR model] "
-            f"provider=sherpa-onnx | model_path={MODEL_PATH} | "
-            "decoding_method=greedy_search"
+        asr_log.info(
+            "model | provider=sherpa-onnx | model_path=%s | decoding_method=greedy_search",
+            MODEL_PATH,
         )
-        print(
-            "[VAD model] "
-            "repo=snakers4/silero-vad | model=silero_vad | "
-            f"start_threshold={VAD_START_THRESHOLD} | "
-            f"end_threshold={VAD_END_THRESHOLD} | "
-            f"energy_threshold={ENERGY_THRESHOLD:.4f} | "
-            f"adaptive_energy={ADAPTIVE_ENERGY_ENABLED} | "
-            f"max_silence_frames={MAX_SILENCE_FRAMES}"
+        asr_log.info(
+            "vad | repo=snakers4/silero-vad | model=silero_vad | start_threshold=%.2f | "
+            "end_threshold=%.2f | energy_threshold=%.4f | adaptive_energy=%s | max_silence_frames=%s",
+            VAD_START_THRESHOLD,
+            VAD_END_THRESHOLD,
+            ENERGY_THRESHOLD,
+            ADAPTIVE_ENERGY_ENABLED,
+            MAX_SILENCE_FRAMES,
         )
 
         self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
@@ -505,7 +533,7 @@ class LocalStreamingASR:
             if final:
                 final = _postprocess_asr_final(final)
                 _asr_metrics.observe_final(final)
-                print(f"\n[ASR final  ]: {final}")
+                asr_log.info("final | text=%s", final)
                 return final
 
         return ""
@@ -532,7 +560,7 @@ class _QwenASRCallback:
                 if transcript:
                     self.final_queue.put(transcript)
         except Exception as exc:
-            print(f"[ASR] Qwen callback error: {exc}")
+            asr_log.warning("Qwen callback error: %s", exc)
 
 
 class QwenStreamingASR:
@@ -557,9 +585,10 @@ class QwenStreamingASR:
         self._conversation = None
         self._connect_conversation()
 
-        print(
-            "[ASR model] "
-            f"provider=qwen_api | model={QWEN_ASR_MODEL} | language={QWEN_ASR_LANGUAGE}"
+        asr_log.info(
+            "model | provider=qwen_api | model=%s | language=%s",
+            QWEN_ASR_MODEL,
+            QWEN_ASR_LANGUAGE,
         )
 
     def _connect_conversation(self) -> None:
@@ -582,7 +611,7 @@ class QwenStreamingASR:
         )
 
     def _reconnect_conversation(self) -> None:
-        print("[ASR] Qwen websocket closed, reconnecting...")
+        asr_log.warning("Qwen websocket closed, reconnecting...")
         _asr_metrics.observe_qwen_reconnect()
         try:
             if self._conversation is not None:
@@ -610,7 +639,7 @@ class QwenStreamingASR:
             final = self._final_queue.get_nowait()
             final = _postprocess_asr_final(final)
             _asr_metrics.observe_final(final)
-            print(f"\n[ASR final  ]: {final}")
+            asr_log.info("final | text=%s", final)
             return final
         except queue.Empty:
             return ""
@@ -630,21 +659,23 @@ def build_asr_backend():
     if USE_QWEN_ASR_API:
         try:
             asr = QwenStreamingASR()
-            print("[ASR route] primary=qwen_api | fallback=zipformer")
+            asr_log.info("route | primary=qwen_api | fallback=zipformer")
             return asr
         except Exception as exc:
-            print(f"[ASR] Qwen ASR unavailable, fallback to local zipformer: {exc}")
+            asr_log.warning("Qwen ASR unavailable, fallback to local zipformer: %s", exc)
     asr = LocalStreamingASR()
-    print("[ASR route] primary=zipformer")
+    asr_log.info("route | primary=zipformer")
     return asr
 
 
 def _translate_local(text: str) -> str | None:
     try:
-        print(
-            "[MT request] "
-            f"url={MT_URL} | source={MT_SOURCE_LANG} | target={MT_TARGET_LANG} | "
-            f"timeout={MT_TIMEOUT_SEC}s"
+        mt_log.info(
+            "request | url=%s | source=%s | target=%s | timeout=%ss",
+            MT_URL,
+            MT_SOURCE_LANG,
+            MT_TARGET_LANG,
+            MT_TIMEOUT_SEC,
         )
         resp = requests.post(
             MT_URL,
@@ -658,13 +689,13 @@ def _translate_local(text: str) -> str | None:
         resp.raise_for_status()
         result = resp.json().get("translated_text", "").strip()
         if result:
-            print(f"[MT  ]: {result}")
+            mt_log.info("result | text=%s", result)
         return result or None
     except requests.exceptions.Timeout:
-        print("[MT] Timed out - skipping utterance.")
+        mt_log.warning("Timed out - skipping utterance.")
         return None
     except Exception as exc:
-        print(f"[MT] Error: {exc}")
+        mt_log.error("Error: %s", exc)
         return None
 
 
@@ -712,13 +743,13 @@ def _translate_deepseek(text: str) -> str | None:
         data = resp.json()
         result = data["choices"][0]["message"]["content"].strip()
         if result:
-            print(f"[MT  ]: {result}")
+            mt_log.info("result | text=%s", result)
         return result or None
     except requests.exceptions.Timeout:
-        print("[MT] Timed out - skipping utterance.")
+        mt_log.warning("Timed out - skipping utterance.")
         return None
     except Exception as exc:
-        print(f"[MT] Exception: {exc}")
+        mt_log.error("Exception: %s", exc)
         return None
 
 
@@ -760,17 +791,14 @@ def _put_latest(queue_obj: queue.Queue, item, label: str) -> None:
 
     drop_count = _queue_drop_counts[label]
     if drop_count == 1 or drop_count % 10 == 0:
-        print(
-            f"[Queue] {label} queue full, dropping oldest item (drop_count={drop_count})",
-            file=sys.stderr,
-        )
+        queue_log.warning("%s queue full, dropping oldest item (drop_count=%s)", label, drop_count)
 
 
 def _audio_callback(indata, frames, time_info, status):
     global _audio_overflow_count, _audio_drop_count
     if status:
         _audio_overflow_count += 1
-        print(f"[Audio] {status} | overflow_count={_audio_overflow_count}", file=sys.stderr)
+        audio_log.warning("%s | overflow_count=%s", status, _audio_overflow_count)
 
     chunk = indata[:, 0].copy()
     try:
@@ -786,10 +814,9 @@ def _audio_callback(indata, frames, time_info, status):
         except queue.Full:
             pass
         if _audio_drop_count == 1 or _audio_drop_count % 10 == 0:
-            print(
-                "[Audio] capture queue full, dropping oldest buffered chunk "
-                f"(drop_count={_audio_drop_count})",
-                file=sys.stderr,
+            audio_log.warning(
+                "capture queue full, dropping oldest buffered chunk (drop_count=%s)",
+                _audio_drop_count,
             )
 
 
@@ -797,7 +824,7 @@ def _run_tts(text: str, lang: str) -> None:
     try:
         tts_speak(text, lang=lang)
     except Exception as exc:
-        print(f"[TTS thread] crashed: {exc}")
+        get_logger("TTS").error("thread crashed: %s", exc)
 
 
 def _asr_worker(asr, stop_event: threading.Event) -> None:
@@ -814,7 +841,7 @@ def _asr_worker(asr, stop_event: threading.Event) -> None:
                     _put_latest(_asr_text_q, final, "asr_text")
             except Exception as exc:
                 _asr_metrics.observe_asr_error()
-                print(f"[ASR worker] recoverable error: {exc}", file=sys.stderr)
+                asr_log.warning("worker recoverable error: %s", exc)
                 time.sleep(0.2)
         finally:
             _audio_q.task_done()
@@ -849,34 +876,47 @@ def _tts_worker(stop_event: threading.Event) -> None:
 
 
 def main():
-    print("ASR -> MT -> TTS pipeline starting...\n")
-    print(
-        "[Pipeline config] "
-        f"audio_sample_rate={SAMPLE_RATE} | frame_size={FRAME_SIZE} | channels={CHANNELS} | "
-        f"input_latency={AUDIO_INPUT_LATENCY} | audio_queue_max_chunks={AUDIO_QUEUE_MAX_CHUNKS} | "
-        f"asr_result_queue_max={ASR_RESULT_QUEUE_MAX} | tts_queue_max={TTS_QUEUE_MAX} | "
-        f"mt_target_lang={MT_TARGET_LANG}"
+    pipeline_log.info("ASR -> MT -> TTS pipeline starting")
+    pipeline_log.info(
+        "config | audio_sample_rate=%s | frame_size=%s | channels=%s | input_latency=%s | "
+        "audio_queue_max_chunks=%s | asr_result_queue_max=%s | tts_queue_max=%s | mt_target_lang=%s",
+        SAMPLE_RATE,
+        FRAME_SIZE,
+        CHANNELS,
+        AUDIO_INPUT_LATENCY,
+        AUDIO_QUEUE_MAX_CHUNKS,
+        ASR_RESULT_QUEUE_MAX,
+        TTS_QUEUE_MAX,
+        MT_TARGET_LANG,
     )
-    print(
-        "[ASR observability] "
-        f"enabled={ASR_METRICS_ENABLED} | log_interval_sec={max(5, ASR_METRICS_LOG_INTERVAL_SEC)}"
+    pipeline_log.info("logs | file=%s", default_log_path())
+    asr_log.info(
+        "observability | enabled=%s | log_interval_sec=%s",
+        ASR_METRICS_ENABLED,
+        max(5, ASR_METRICS_LOG_INTERVAL_SEC),
     )
-    print(_hotword_manager.describe())
-    print(
-        "[ASR adaptive energy] "
-        f"enabled={ADAPTIVE_ENERGY_ENABLED} | base_threshold={ENERGY_THRESHOLD:.4f} | "
-        f"release_ratio={ENERGY_RELEASE_RATIO:.2f} | noise_floor_alpha={ADAPTIVE_ENERGY_NOISE_FLOOR_ALPHA:.3f} | "
-        f"min_factor={ADAPTIVE_ENERGY_MIN_FACTOR:.2f} | max_factor={ADAPTIVE_ENERGY_MAX_FACTOR:.2f} | "
-        f"vad_ceiling={ADAPTIVE_ENERGY_VAD_CEILING:.2f}"
+    hotword_log.info(_hotword_manager.describe())
+    asr_log.info(
+        "adaptive_energy | enabled=%s | base_threshold=%.4f | release_ratio=%.2f | "
+        "noise_floor_alpha=%.3f | min_factor=%.2f | max_factor=%.2f | vad_ceiling=%.2f",
+        ADAPTIVE_ENERGY_ENABLED,
+        ENERGY_THRESHOLD,
+        ENERGY_RELEASE_RATIO,
+        ADAPTIVE_ENERGY_NOISE_FLOOR_ALPHA,
+        ADAPTIVE_ENERGY_MIN_FACTOR,
+        ADAPTIVE_ENERGY_MAX_FACTOR,
+        ADAPTIVE_ENERGY_VAD_CEILING,
     )
 
     if USE_LOCAL_MT:
-        print(
-            "[MT model ] "
-            f"provider=local_api | url={MT_URL} | source={MT_SOURCE_LANG} | target={MT_TARGET_LANG}"
+        mt_log.info(
+            "model | provider=local_api | url=%s | source=%s | target=%s",
+            MT_URL,
+            MT_SOURCE_LANG,
+            MT_TARGET_LANG,
         )
     else:
-        print(f"[MT model ] provider=deepseek | model={DEEPSEEK_MODEL}")
+        mt_log.info("model | provider=deepseek | model=%s", DEEPSEEK_MODEL)
 
     asr = build_asr_backend()
     stop_event = threading.Event()
@@ -904,7 +944,7 @@ def main():
     for worker in workers:
         worker.start()
 
-    print("\nSystem ready - start speaking!\n")
+    pipeline_log.info("System ready - start speaking!")
 
     try:
         with sd.InputStream(
@@ -919,7 +959,7 @@ def main():
                 time.sleep(0.5)
                 _asr_metrics.maybe_log()
     except KeyboardInterrupt:
-        print("\nPipeline stopped.")
+        pipeline_log.info("Pipeline stopped.")
     finally:
         _asr_metrics.maybe_log(force=True)
         stop_event.set()

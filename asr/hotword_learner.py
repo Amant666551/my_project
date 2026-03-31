@@ -13,6 +13,12 @@ from typing import Iterable
 
 import requests
 
+from app_logging import configure_logging, get_logger
+
+
+configure_logging()
+log = get_logger("HotwordLearner")
+
 
 SOURCE_TIMEOUT_SEC = int(os.getenv("HOTWORD_SOURCE_TIMEOUT_SEC", "12"))
 CANDIDATE_CONTEXT_LIMIT = max(1, int(os.getenv("HOTWORD_CANDIDATE_CONTEXT_LIMIT", "3")))
@@ -157,7 +163,7 @@ class HotwordLearner:
 
     def run(self) -> tuple[int, int]:
         if not self.sources:
-            print(f"[Hotword learner] no enabled sources found in {self.sources_path.name}")
+            log.warning("no enabled sources found in %s", self.sources_path.name)
             return 0, 0
 
         discovered: dict[str, list[_CandidateSignal]] = defaultdict(list)
@@ -167,7 +173,7 @@ class HotwordLearner:
             try:
                 source_ref, raw_text = self._load_source_text(source)
             except Exception as exc:
-                print(f"[Hotword learner] failed source={source.get('name', 'unknown')}: {exc}")
+                log.warning("failed source=%s: %s", source.get("name", "unknown"), exc)
                 continue
             for signal in self._extract_signals(source, source_ref, raw_text):
                 if signal.term in self.existing_hotwords:
@@ -176,9 +182,11 @@ class HotwordLearner:
 
         updated = self._merge_discovered(discovered)
         self._write_candidates()
-        print(
-            "[Hotword learner] "
-            f"processed_sources={processed_sources} | discovered_terms={len(discovered)} | updated_candidates={updated}"
+        log.info(
+            "processed_sources=%s | discovered_terms=%s | updated_candidates=%s",
+            processed_sources,
+            len(discovered),
+            updated,
         )
         return processed_sources, updated
 

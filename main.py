@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import io
 import json
 import os
 import queue
@@ -53,12 +55,18 @@ warnings.filterwarnings(
     message="You have modified the pretrained model configuration to control generation",
     category=UserWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    message="pkg_resources is deprecated as an API.*",
+    category=UserWarning,
+)
 
 import numpy as np
 import redis
 import torch
 from dotenv import load_dotenv
 
+from app_logging import configure_logging, get_logger
 from asr.audio_player import play_audio_file
 
 # =============================================================================
@@ -66,6 +74,7 @@ from asr.audio_player import play_audio_file
 # =============================================================================
 
 load_dotenv()
+configure_logging()
 
 TTS_BACKEND = "xtts"                          # "xtts" | "openvoice" | "edge"
 VOICE_SAMPLE = os.getenv(
@@ -108,28 +117,8 @@ RETRY_DELAY = 1.0
 
 # =============================================================================
 
-class _PrintLogger:
-    @staticmethod
-    def _emit(level: str, message: str, *args) -> None:
-        if args:
-            try:
-                message = message % args
-            except Exception:
-                message = f"{message} {' '.join(map(str, args))}"
-        timestamp = time.strftime("%H:%M:%S")
-        print(f"{timestamp} [TTS] {level:<7} {message}")
-
-    def info(self, message: str, *args) -> None:
-        self._emit("INFO", message, *args)
-
-    def warning(self, message: str, *args) -> None:
-        self._emit("WARNING", message, *args)
-
-    def error(self, message: str, *args) -> None:
-        self._emit("ERROR", message, *args)
-
-
-log = _PrintLogger()
+log = get_logger("TTS")
+log.info("startup | configuring TTS backends")
 
 _cpu_count = os.cpu_count() or 4
 torch.set_num_threads(_cpu_count)
@@ -196,7 +185,16 @@ _patch_torch_isin()
 
 
 def _resolve_model_paths(manager, model_name: str) -> tuple[str, str]:
-    result = manager.download_model(model_name)
+    captured_stdout = io.StringIO()
+    captured_stderr = io.StringIO()
+    with contextlib.redirect_stdout(captured_stdout), contextlib.redirect_stderr(captured_stderr):
+        result = manager.download_model(model_name)
+
+    for captured in (captured_stdout.getvalue(), captured_stderr.getvalue()):
+        for line in captured.splitlines():
+            line = line.strip()
+            if line:
+                log.info("XTTS setup | %s", line)
 
     model_path = None
     config_path = None
@@ -665,10 +663,12 @@ def _load_backend():
     raise ValueError(f"Unknown TTS_BACKEND '{TTS_BACKEND}'.")
 
 
+log.info("startup | loading fallback backend=%s", TTS_BACKEND)
 _backend = _load_backend()
 _qwen_tts_backend = None
 if USE_QWEN_TTS_API:
     try:
+        log.info("startup | loading primary backend=qwen_api")
         _qwen_tts_backend = _QwenTTSAPIBackend()
     except Exception as exc:
         log.warning(

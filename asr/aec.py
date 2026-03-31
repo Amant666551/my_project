@@ -4,7 +4,11 @@ import os
 
 import numpy as np
 
+from app_logging import get_logger
 from .playback_bus import playback_bus
+
+
+log = get_logger("AEC")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -115,7 +119,7 @@ class EchoCanceller:
             return _PassthroughAECBackend()
 
         if self.backend_name in {"none", "passthrough", "stub"}:
-            print("[AEC] enabled=True | backend=passthrough | note=ready for future backend")
+            log.info("enabled=True | backend=passthrough | note=ready for future backend")
             return _PassthroughAECBackend()
 
         if self.backend_name in {"auto", "pyaec"}:
@@ -124,30 +128,29 @@ class EchoCanceller:
                     sample_rate=self.sample_rate,
                     frame_size=self.frame_size,
                 )
-                print(
-                    "[AEC] backend=pyaec initialized | "
-                    f"sample_rate={self.sample_rate} | frame_size={backend.process_frame_size} | "
-                    f"filter_length={backend.filter_length}"
+                log.info(
+                    "backend=pyaec initialized | sample_rate=%s | frame_size=%s | filter_length=%s",
+                    self.sample_rate,
+                    backend.process_frame_size,
+                    backend.filter_length,
                 )
                 return backend
             except ImportError:
-                print(
-                    "[AEC] backend=pyaec requested, but package 'pyaec' is not installed. "
-                    "Falling back to passthrough."
+                log.warning(
+                    "backend=pyaec requested, but package 'pyaec' is not installed. Falling back to passthrough."
                 )
                 return _PassthroughAECBackend()
             except Exception as exc:
-                print(f"[AEC] pyaec initialization failed: {exc}. Falling back to passthrough.")
+                log.warning("pyaec initialization failed: %s. Falling back to passthrough.", exc)
                 return _PassthroughAECBackend()
 
         if self.backend_name == "webrtc":
-            print(
-                "[AEC] backend=webrtc requested, but no WebRTC binding is installed yet. "
-                "Falling back to passthrough."
+            log.warning(
+                "backend=webrtc requested, but no WebRTC binding is installed yet. Falling back to passthrough."
             )
             return _PassthroughAECBackend()
 
-        print(f"[AEC] unknown backend '{self.backend_name}', falling back to passthrough.")
+        log.warning("unknown backend '%s', falling back to passthrough.", self.backend_name)
         return _PassthroughAECBackend()
 
     def process_capture(self, mic_frame: np.ndarray) -> np.ndarray:

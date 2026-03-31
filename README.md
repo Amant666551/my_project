@@ -401,8 +401,38 @@ ASR_METRICS_LOG_INTERVAL_SEC=30
 
 说明：
 
-- `ASR_METRICS_ENABLED` 控制是否输出 `[ASR metrics]`
+- `ASR_METRICS_ENABLED` 控制是否生成 ASR 统计日志
 - `ASR_METRICS_LOG_INTERVAL_SEC` 控制统计窗口长度
+- 当前默认 `LOG_FILE_MODE=concise` 时，周期性 metrics 不会写入文件
+- 若要查看完整 metrics，建议临时切到 `LOG_FILE_MODE=verbose`，或把控制台切到 `LOG_CONSOLE_MODE=verbose`
+
+### 日志配置项
+
+```env
+LOG_LEVEL=INFO
+LOG_CONSOLE_ENABLED=true
+LOG_CONSOLE_LEVEL=INFO
+LOG_CONSOLE_MODE=minimal
+LOG_FILE_ENABLED=true
+LOG_FILE_LEVEL=INFO
+LOG_FILE_MODE=concise
+LOG_DIR=logs
+LOG_FILE_NAME=pipeline.log
+LOG_MAX_BYTES=5242880
+LOG_BACKUP_COUNT=3
+```
+
+说明：
+
+- 当前默认是“终端精简 + 文件精简”
+- `LOG_CONSOLE_MODE=minimal` 时，终端只保留三类核心结果：
+  - `[ASR final  ]: ...`
+  - `[MT  ]: ...`
+  - `HH:MM:SS [TTS] TTS provider | ...`
+- `LOG_CONSOLE_MODE=verbose` 时，终端会恢复完整运行日志
+- `LOG_FILE_MODE=concise` 时，[`logs/pipeline.log`](/C:/Users/30909/Desktop/document/files/logs/pipeline.log) 只保留启动、就绪、结果链路以及所有 warning/error
+- `LOG_FILE_MODE=verbose` 时，文件会保留完整 INFO 日志，包括启动细节、路由、AEC、metrics 等
+- `LOG_MAX_BYTES` 和 `LOG_BACKUP_COUNT` 控制滚动日志大小与保留份数
 
 ### ASR 自适应门限配置项
 
@@ -561,36 +591,47 @@ python record_voice.py --activate 2
 - `QWEN_TTS_VOICE_SAMPLE`
 - `VOICE_SAMPLE`
 
-## 启动后建议关注的日志
+## 当前日志行为
 
-启动时：
+### 终端默认输出
 
-- `[Pipeline config] ...`
-- `[ASR observability] enabled=... | log_interval_sec=...`
-- `[ASR hotwords] enabled=... | entries=... | aliases=... | pinyin_enabled=...`
-- `[ASR adaptive energy] enabled=... | base_threshold=...`
-- `[MT model ] provider=deepseek | model=deepseek-chat`
-- 或 `[MT model ] provider=local_api | url=...`
-- `[AEC] enabled=... | backend=...`
-- `[ASR model] provider=qwen_api | model=... | language=...`
-- 或 `[ASR model] provider=sherpa-onnx | model_path=...`
-- `[ASR route] primary=qwen_api | fallback=zipformer`
-- 或 `[ASR route] primary=zipformer`
-- `[TTS] INFO    TTS primary model | provider=qwen_api | model=...`
-- `[TTS] INFO    TTS fallback model | provider=xtts | model=xtts_v2 | device=...`
-
-运行中：
+当前默认 `LOG_CONSOLE_MODE=minimal`，终端只保留三类核心结果：
 
 - `[ASR final  ]: ...`
-- `[ASR hotword] matches=... | original=... | rewritten=...`
-- `[ASR metrics] ...`
 - `[MT  ]: ...`
-- `[TTS] INFO    TTS provider | provider=qwen_api | model=...`
-- `[ASR] Qwen websocket closed, reconnecting...`
-- `[Audio] input overflow | ...`
-- `[Audio] capture queue full, dropping oldest buffered chunk ...`
-- `[Queue] asr_text queue full, dropping oldest item ...`
-- `[Queue] tts queue full, dropping oldest item ...`
+- `HH:MM:SS [TTS] TTS provider | ...`
+
+这适合日常测试时直接盯终端看识别、翻译和播报结果。
+
+### 文件日志默认输出
+
+当前默认 `LOG_FILE_MODE=concise`，详细日志写入：
+
+- [`logs/pipeline.log`](/C:/Users/30909/Desktop/document/files/logs/pipeline.log)
+
+默认会保留：
+
+- 主管线启动
+- `System ready - start speaking!`
+- `ASR final`
+- `MT result`
+- `TTS provider`
+- 所有 warning / error
+
+默认不会保留：
+
+- 启动阶段的大量细节 INFO
+- AEC / route / model 说明
+- 周期性 `[ASR metrics]`
+
+### 需要完整日志时
+
+如果你想临时查看完整日志：
+
+- 终端完整输出：`LOG_CONSOLE_MODE=verbose`
+- 文件完整输出：`LOG_FILE_MODE=verbose`
+
+这样会恢复启动细节、路由、模型、AEC、metrics 等完整 INFO 日志。
 
 ## 当前已知问题
 
