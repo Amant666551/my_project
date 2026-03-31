@@ -79,3 +79,37 @@
 22:23:59 [pipeline.MT] INFO    result | text=Oh, I'm so annoyed.
 22:24:00 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
 22:33:22 [pipeline.PIPELINE] INFO    Pipeline stopped.
+23:45:30 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+23:45:31 [pipeline.PIPELINE] INFO    System ready - start speaking!
+23:45:49 [pipeline.ASR] INFO    final | text=我感觉他期末考试真的大概率会出，呃，出这个深度分解和拉布奇书。
+23:45:54 [pipeline.ASR] INFO    final | text=形式分论，我感觉确实是挺容易考。
+23:45:55 [pipeline.MT] INFO    result | text=I feel like there's a high probability that he will include, uh, deep decomposition and the Labouchere book in the final exam.
+23:45:58 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+23:46:02 [pipeline.MT] INFO    result | text=Formal analysis, I feel like it's really easy to test on.
+23:46:10 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+00:04:06 [pipeline.PIPELINE] INFO    Pipeline stopped.
+00:06:00 [pipeline.PIPELINE] INFO    System ready - start speaking!
+00:06:32 [pipeline.ASR] INFO    final | text=明天还要上早九。
+00:06:38 [pipeline.MT] INFO    result | text=I still have to attend the 9 a.m. class tomorrow.
+00:06:41 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+00:09:31 [pipeline.PIPELINE] INFO    System ready - start speaking!
+00:11:23 [pipeline.ASR] INFO    final | text=对呀，今天竟然愚人节。
+00:11:28 [pipeline.MT] INFO    result | text=Yeah, today is actually April Fool's Day.
+00:11:29 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+00:45:03 [pipeline.ASR] WARNING Qwen ASR unavailable, fallback to local zipformer: Remote end closed connection without response
+00:45:25 [pipeline.PIPELINE] INFO    System ready - start speaking!
+00:45:32 [pipeline.ASR] INFO    final | text=在睡觉了
+00:45:37 [pipeline.MT] INFO    result | text=Going to sleep now.
+00:45:38 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+00:49:40 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+00:49:40 [pipeline.MT.CONTEXT] INFO    scene_analyzer | enabled=True | model=deepseek-chat | timeout=8s
+00:50:02 [pipeline.PIPELINE] INFO    System ready - start speaking!
+00:50:22 [pipeline.ASR] INFO    final | text=嗯嗯嗯。
+00:50:22 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=scene_analyzer | model=deepseek-chat | timeout=8s
+00:50:26 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=scene_analyzer | chars=246
+00:50:26 [pipeline.MT.CONTEXT] INFO    scene_result | scene=daily_chat | utterance_type=fragment | entity_focus=none | register=spoken | confidence=high
+00:50:26 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+00:50:28 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=7
+00:50:28 [pipeline.MT] INFO    result | text=Uh-huh.
+00:50:28 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+00:56:07 [pipeline.PIPELINE] INFO    Pipeline stopped.

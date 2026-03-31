@@ -27,12 +27,14 @@ import torch
 from dotenv import load_dotenv
 from pyrnnoise import RNNoise
 
+load_dotenv(override=True)
+
 from app_logging import configure_logging, default_log_path, get_logger
 from asr.aec import EchoCanceller
 from asr.hotword_manager import HotwordManager
 from mt.prompt_context import MTPromptContext
+from mt.scene_analyzer import SceneAnalysis, parse_scene_analysis
 
-load_dotenv(override=True)
 configure_logging()
 
 bootstrap_log = get_logger("BOOT")
@@ -80,6 +82,10 @@ MT_URL = os.getenv("MT_URL", "http://127.0.0.1:8000/translate")
 MT_SOURCE_LANG = os.getenv("MT_SOURCE_LANG", "zh")
 MT_TARGET_LANG = os.getenv("MT_TARGET_LANG", "en")
 MT_TIMEOUT_SEC = int(os.getenv("MT_TIMEOUT_SEC", "8"))
+MT_SCENE_ANALYZER_ENABLED = os.getenv("MT_SCENE_ANALYZER_ENABLED", "true").lower() == "true"
+MT_SCENE_ANALYZER_MODEL = os.getenv("MT_SCENE_ANALYZER_MODEL", DEEPSEEK_MODEL)
+MT_SCENE_ANALYZER_TIMEOUT_SEC = int(os.getenv("MT_SCENE_ANALYZER_TIMEOUT_SEC", str(MT_TIMEOUT_SEC)))
+MT_SCENE_ANALYZER_REFRESH_TURNS = max(1, int(os.getenv("MT_SCENE_ANALYZER_REFRESH_TURNS", "10")))
 ASR_METRICS_ENABLED = os.getenv("ASR_METRICS_ENABLED", "true").lower() == "true"
 ASR_METRICS_LOG_INTERVAL_SEC = int(os.getenv("ASR_METRICS_LOG_INTERVAL_SEC", "30"))
 
@@ -281,6 +287,10 @@ class _ASRMetrics:
 _asr_metrics = _ASRMetrics()
 _hotword_manager = HotwordManager()
 _mt_prompt_context = MTPromptContext()
+_mt_scene_cache = {
+    "analysis": SceneAnalysis(),
+    "turns_since_refresh": MT_SCENE_ANALYZER_REFRESH_TURNS,
+}
 
 
 def _postprocess_asr_final(text: str) -> str:
@@ -295,14 +305,142 @@ def _postprocess_asr_final(text: str) -> str:
 
 
 def _mt_context_prompt(text: str) -> str:
-    prompt = _mt_prompt_context.build_prompt(text, MT_SOURCE_LANG, MT_TARGET_LANG)
+    analysis = _analyze_mt_scene(text)
+    prompt = _mt_prompt_context.build_translation_prompt(analysis.summary_block())
     if prompt:
-        mt_context_log.info("prompt_built | text=%s", text)
+        mt_context_log.info(
+            "scene=%s | utterance_type=%s | entity_focus=%s | confidence=%s",
+            analysis.scene,
+            analysis.utterance_type,
+            analysis.entity_focus,
+            analysis.confidence,
+        )
     return prompt
 
 
 def _mt_remember_turn(text: str, translated: str) -> None:
     _mt_prompt_context.observe_turn(text, translated)
+
+
+def _call_deepseek_chat(
+    *,
+    messages: list[dict[str, str]],
+    model: str,
+    timeout_sec: int,
+    stage: str,
+) -> str:
+    mt_context_log.info(
+        "deepseek_call | stage=%s | model=%s | timeout=%ss",
+        stage,
+        model,
+        timeout_sec,
+    )
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.0,
+    }
+
+    resp = requests.post(
+        f"{DEEPSEEK_BASE_URL}/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=timeout_sec,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    content = data["choices"][0]["message"]["content"].strip()
+    mt_context_log.info(
+        "deepseek_done | stage=%s | chars=%s",
+        stage,
+        len(content),
+    )
+    return content
+
+
+def _analyze_mt_scene(text: str) -> SceneAnalysis:
+    if not MT_SCENE_ANALYZER_ENABLED:
+        return SceneAnalysis()
+
+    cached_analysis = _mt_scene_cache["analysis"]
+    turns_since_refresh = int(_mt_scene_cache["turns_since_refresh"])
+    if turns_since_refresh < MT_SCENE_ANALYZER_REFRESH_TURNS:
+        _mt_scene_cache["turns_since_refresh"] = turns_since_refresh + 1
+        mt_context_log.info(
+            "scene_cache_hit | turn=%s/%s | scene=%s | entity_focus=%s",
+            turns_since_refresh + 1,
+            MT_SCENE_ANALYZER_REFRESH_TURNS,
+            cached_analysis.scene,
+            cached_analysis.entity_focus,
+        )
+        return cached_analysis
+
+    recent_context = _mt_prompt_context.recent_context_block()
+    context_block = f"\n\n{recent_context}" if recent_context else ""
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a scene disambiguation expert for a real-time speech translation system. "
+                "Analyze the current utterance and return only compact JSON. "
+                "Use this schema exactly: "
+                '{"scene":"general|campus|technical|literature|daily_chat|other",'
+                '"utterance_type":"statement|question|fragment|exclamation|other",'
+                '"entity_focus":"person|organization|course|concept|none",'
+                '"register":"spoken|formal|mixed",'
+                '"translation_hint":"short guidance for the translator",'
+                '"confidence":"high|medium|low"}'
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Source language: {MT_SOURCE_LANG}\n"
+                f"Target language: {MT_TARGET_LANG}\n"
+                f"Current utterance: {text}"
+                f"{context_block}"
+            ),
+        },
+    ]
+
+    try:
+        response_text = _call_deepseek_chat(
+            messages=messages,
+            model=MT_SCENE_ANALYZER_MODEL,
+            timeout_sec=MT_SCENE_ANALYZER_TIMEOUT_SEC,
+            stage="scene_analyzer",
+        )
+        analysis = parse_scene_analysis(response_text)
+        mt_context_log.info(
+            "scene_result | scene=%s | utterance_type=%s | entity_focus=%s | register=%s | confidence=%s",
+            analysis.scene,
+            analysis.utterance_type,
+            analysis.entity_focus,
+            analysis.register,
+            analysis.confidence,
+        )
+        previous = _mt_scene_cache["analysis"]
+        if analysis.cache_key() == previous.cache_key():
+            mt_context_log.info("scene_cache_refresh | changed=False")
+        else:
+            mt_context_log.info(
+                "scene_cache_refresh | changed=True | old_scene=%s | new_scene=%s",
+                previous.scene,
+                analysis.scene,
+            )
+            _mt_scene_cache["analysis"] = analysis
+        _mt_scene_cache["turns_since_refresh"] = 1
+        return analysis
+    except requests.exceptions.Timeout:
+        mt_context_log.warning("scene analyzer timed out; falling back to default analysis")
+        return SceneAnalysis()
+    except Exception as exc:
+        mt_context_log.warning("scene analyzer failed: %s", exc)
+        return SceneAnalysis()
 
 
 @dataclass
@@ -722,47 +860,36 @@ def _translate_deepseek(text: str) -> str | None:
     try:
         source_name = LANGUAGE_NAME_MAP.get(MT_SOURCE_LANG, MT_SOURCE_LANG)
         target_name = LANGUAGE_NAME_MAP.get(MT_TARGET_LANG, MT_TARGET_LANG)
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": DEEPSEEK_MODEL,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a strict translation engine, not a chatbot. "
-                        f"Translate the user's text from {source_name} to {target_name}. "
-                        "Return only the translated text. "
-                        "Do not answer the user. "
-                        "Do not continue the conversation. "
-                        "Do not explain anything. "
-                        "Do not add quotation marks or notes. "
-                        "If the input is already in the target language, return it unchanged. "
-                        "If the input is a fragment, translate only that fragment. "
-                        "Keep proper nouns and domain terms consistent across turns. "
-                        f"{prompt_suffix}"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": text,
-                },
-            ],
-            "temperature": 0.0,
-        }
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a strict translation engine, not a chatbot. "
+                    f"Translate the user's text from {source_name} to {target_name}. "
+                    "Return only the translated text. "
+                    "Do not answer the user. "
+                    "Do not continue the conversation. "
+                    "Do not explain anything. "
+                    "Do not add quotation marks or notes. "
+                    "If the input is already in the target language, return it unchanged. "
+                    "If the input is a fragment, translate only that fragment. "
+                    "Use the provided scene analysis only for disambiguation. "
+                    "Keep proper nouns and domain terms consistent across turns. "
+                    f"{prompt_suffix}"
+                ),
+            },
+            {
+                "role": "user",
+                "content": text,
+            },
+        ]
 
-        resp = requests.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=MT_TIMEOUT_SEC,
+        result = _call_deepseek_chat(
+            messages=messages,
+            model=DEEPSEEK_MODEL,
+            timeout_sec=MT_TIMEOUT_SEC,
+            stage="translator",
         )
-        resp.raise_for_status()
-
-        data = resp.json()
-        result = data["choices"][0]["message"]["content"].strip()
         if result:
             _mt_remember_turn(text, result)
             mt_log.info("result | text=%s", result)
@@ -940,6 +1067,16 @@ def main():
     else:
         mt_log.info("model | provider=deepseek | model=%s", DEEPSEEK_MODEL)
     mt_context_log.info(_mt_prompt_context.describe())
+    mt_context_log.info(
+        "scene_analyzer | enabled=%s | model=%s | timeout=%ss",
+        MT_SCENE_ANALYZER_ENABLED,
+        MT_SCENE_ANALYZER_MODEL,
+        MT_SCENE_ANALYZER_TIMEOUT_SEC,
+    )
+    mt_context_log.info(
+        "scene_cache | refresh_turns=%s",
+        MT_SCENE_ANALYZER_REFRESH_TURNS,
+    )
 
     asr = build_asr_backend()
     stop_event = threading.Event()

@@ -38,12 +38,26 @@ def _log_level(name: str, default: int = logging.INFO) -> int:
 
 def _console_mode() -> str:
     value = os.getenv("LOG_CONSOLE_MODE", "minimal").strip().lower()
-    return value or "minimal"
+    return _normalize_mode(value, default="minimal")
 
 
 def _file_mode() -> str:
-    value = os.getenv("LOG_FILE_MODE", "concise").strip().lower()
-    return value or "concise"
+    value = os.getenv("LOG_FILE_MODE", "minimal").strip().lower()
+    return _normalize_mode(value, default="minimal")
+
+
+def _normalize_mode(value: str, *, default: str) -> str:
+    aliases = {
+        "quiet": "minimal",
+        "concise": "minimal",
+        "standard": "normal",
+        "default": "normal",
+        "full": "verbose",
+    }
+    normalized = aliases.get(value, value)
+    if normalized not in {"minimal", "normal", "verbose"}:
+        return default
+    return normalized
 
 
 def _is_core_result_record(record: logging.LogRecord, message: str) -> bool:
@@ -58,13 +72,38 @@ def _is_core_result_record(record: logging.LogRecord, message: str) -> bool:
     return False
 
 
+def _is_pipeline_lifecycle_record(record: logging.LogRecord, message: str) -> bool:
+    return record.name == f"{_APP_LOGGER_PREFIX}.PIPELINE" and message in {
+        "ASR -> MT -> TTS pipeline starting",
+        "System ready - start speaking!",
+        "Pipeline stopped.",
+    }
+
+
+def _is_mt_context_record(record: logging.LogRecord, message: str) -> bool:
+    return record.name == f"{_APP_LOGGER_PREFIX}.MT.CONTEXT" and (
+        message.startswith("deepseek_call |")
+        or message.startswith("deepseek_done |")
+        or message.startswith("scene_result |")
+        or message.startswith("scene_analyzer |")
+    )
+
+
 class _MinimalConsoleFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
         return _is_core_result_record(record, message)
 
 
-class _ConciseFileFilter(logging.Filter):
+class _NormalConsoleFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+        message = record.getMessage()
+        return _is_core_result_record(record, message) or _is_pipeline_lifecycle_record(record, message)
+
+
+class _MinimalFileFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.levelno >= logging.WARNING:
             return True
@@ -72,12 +111,20 @@ class _ConciseFileFilter(logging.Filter):
         message = record.getMessage()
         if _is_core_result_record(record, message):
             return True
+        return False
 
-        if record.name == f"{_APP_LOGGER_PREFIX}.PIPELINE" and message in {
-            "ASR -> MT -> TTS pipeline starting",
-            "System ready - start speaking!",
-            "Pipeline stopped.",
-        }:
+
+class _NormalFileFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+
+        message = record.getMessage()
+        if _is_core_result_record(record, message):
+            return True
+        if _is_pipeline_lifecycle_record(record, message):
+            return True
+        if _is_mt_context_record(record, message):
             return True
 
         return False
@@ -121,9 +168,13 @@ def configure_logging() -> None:
     if _env_bool("LOG_CONSOLE_ENABLED", True):
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.terminator = "\r\n"
-        if _console_mode() == "minimal":
+        console_mode = _console_mode()
+        if console_mode == "minimal":
             console_handler.addFilter(_MinimalConsoleFilter())
             console_handler.setFormatter(_MinimalConsoleFormatter(datefmt="%H:%M:%S"))
+        elif console_mode == "normal":
+            console_handler.addFilter(_NormalConsoleFilter())
+            console_handler.setFormatter(formatter)
         else:
             console_handler.setFormatter(formatter)
         console_handler.setLevel(_log_level("LOG_CONSOLE_LEVEL", _log_level("LOG_LEVEL", logging.INFO)))
@@ -140,8 +191,11 @@ def configure_logging() -> None:
             encoding="utf-8",
         )
         file_handler.setFormatter(formatter)
-        if _file_mode() == "concise":
-            file_handler.addFilter(_ConciseFileFilter())
+        file_mode = _file_mode()
+        if file_mode == "minimal":
+            file_handler.addFilter(_MinimalFileFilter())
+        elif file_mode == "normal":
+            file_handler.addFilter(_NormalFileFilter())
         file_handler.setLevel(_log_level("LOG_FILE_LEVEL", _log_level("LOG_LEVEL", logging.INFO)))
         setattr(file_handler, _HANDLER_TAG, True)
         _FILE_HANDLER = file_handler

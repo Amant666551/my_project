@@ -66,6 +66,8 @@ import redis
 import torch
 from dotenv import load_dotenv
 
+load_dotenv(override=True)
+
 from app_logging import configure_logging, get_logger
 from asr.audio_player import play_audio_file
 
@@ -73,7 +75,6 @@ from asr.audio_player import play_audio_file
 # USER CONFIGURATION
 # =============================================================================
 
-load_dotenv(override=True)
 configure_logging()
 
 TTS_BACKEND = "xtts"                          # "xtts" | "openvoice" | "edge"

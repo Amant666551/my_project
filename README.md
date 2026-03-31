@@ -108,18 +108,20 @@
 
 ### 7. MT 语境感知提示词工程已接入
 
-当前版本已经把 MT 从“词表增强”路线切换为“语境 prompt 工程”路线：
+当前版本已经把 MT 切换为“双阶段 DeepSeek prompt 工程”路线：
 
 - 模块位置：[`mt/prompt_context.py`](/C:/Users/30909/Desktop/document/files/mt/prompt_context.py)
-- 接入位置：DeepSeek MT 请求前的 `system prompt` 构建
-- 当前策略：根据最近几轮对话、口语特征、问句语气和话题领域，为模型补充消歧语境
+- 模块位置：[`mt/scene_analyzer.py`](/C:/Users/30909/Desktop/document/files/mt/scene_analyzer.py)
+- 接入位置：默认每隔若干句调用一次 DeepSeek 做场景分析，其余句子复用缓存场景，再调用 DeepSeek 做翻译
+- 当前策略：第一阶段负责区分场景、句型、实体关注点；第二阶段根据缓存后的场景分析结果和最近上下文完成翻译
 
 当前设计原则：
 
 - 不额外维护外部 MT 术语知识库
-- 不对 MT 输出做硬编码词表替换
-- 优先依赖 DeepSeek 本身的翻译与术语能力
+- 不在本地做弱规则场景判断
+- 优先依赖 DeepSeek 自身做场景理解与消歧
 - 通过最近对话上下文提升专名、代词和口语碎片的理解稳定性
+- 通过场景缓存降低双阶段 MT 的平均延迟
 
 ## 已验证结论
 
@@ -177,7 +179,8 @@ files/
   - hotword_learner.py     # 第三版候选词学习脚本
 - mt/
   - __init__.py
-  - prompt_context.py      # MT 语境感知 prompt 构建
+  - prompt_context.py      # MT 近期对话上下文缓存与 prompt 拼接
+  - scene_analyzer.py      # MT 场景区分器输出解析
 - api.py                   # 前端服务、控制接口、本地翻译接口
 - translator.py            # 本地翻译模型封装
 - record_voice.py          # 录音、创建 voice、激活 voice
@@ -317,18 +320,32 @@ python orchestrator.py
 
 ### `mt/prompt_context.py`
 
-负责 MT 语境感知 prompt 构建：
+负责 MT 近期对话上下文管理：
 
 - 缓存最近几轮对话的源文本与译文
-- 根据当前句子判断口语特征、问句语气、可能的话题领域
-- 给 DeepSeek MT 注入“只用于消歧”的上下文提示
+- 为场景分析器和翻译器提供近期对话参考
+- 将场景分析结果与近期上下文拼接成最终翻译提示
 
 当前设计原则：
 
-- 不维护外部术语知识库
-- 不对 MT 输出做硬编码词表替换
-- 优先依赖大模型本身的术语能力
-- 通过最近对话语境和提示词工程提升一致性与自然度
+- 不在本地做弱规则场景判断
+- 只维护短期对话上下文
+- 让模型自己负责场景理解
+- 本地只负责缓存上下文和拼 prompt
+
+### `mt/scene_analyzer.py`
+
+负责 MT 场景区分器输出解析：
+
+- 接收第一个 DeepSeek 调用返回的 JSON
+- 解析出 `scene`、`utterance_type`、`entity_focus`、`register`、`translation_hint`
+- 将场景分析结果整理成第二个 DeepSeek 翻译器可直接使用的提示块
+
+当前设计原则：
+
+- 每句都先做一次场景分析
+- 场景分析与翻译分成两个独立模型调用
+- 第一阶段只负责“看懂场景”，第二阶段才负责“生成译文”
 
 ### `api.py`
 
@@ -390,20 +407,28 @@ MT_TARGET_LANG=en
 MT_TIMEOUT_SEC=8
 ```
 
-MT 语境 prompt 配置：
+MT 双阶段 prompt 配置：
 
 ```env
 MT_CONTEXT_ENABLED=true
 MT_CONTEXT_MAX_TURNS=3
 MT_CONTEXT_MAX_CHARS_PER_TURN=80
+MT_SCENE_ANALYZER_ENABLED=true
+MT_SCENE_ANALYZER_MODEL=deepseek-chat
+MT_SCENE_ANALYZER_TIMEOUT_SEC=8
+MT_SCENE_ANALYZER_REFRESH_TURNS=10
 ```
 
 说明：
 
-- `MT_CONTEXT_ENABLED` 控制是否启用语境感知 prompt
+- `MT_CONTEXT_ENABLED` 控制是否启用近期对话上下文缓存
 - `MT_CONTEXT_MAX_TURNS` 控制最多带入多少轮近期上下文
 - `MT_CONTEXT_MAX_CHARS_PER_TURN` 控制每轮上下文写入 prompt 前的截断长度
-- 这套方案的目标不是“词表纠错”，而是“利用对话语境帮助模型消歧”
+- `MT_SCENE_ANALYZER_ENABLED` 控制是否启用第一阶段场景分析
+- `MT_SCENE_ANALYZER_MODEL` 控制场景分析器使用的模型
+- `MT_SCENE_ANALYZER_TIMEOUT_SEC` 控制场景分析器超时时间
+- `MT_SCENE_ANALYZER_REFRESH_TURNS` 控制场景分析结果最多复用多少句后再重新分析
+- 这套方案的目标不是“本地规则判断”，而是“让 DeepSeek 负责场景理解，再让另一个 DeepSeek 负责翻译，并通过场景缓存降低平均延迟”
 
 ### TTS
 
@@ -451,7 +476,7 @@ ASR_METRICS_LOG_INTERVAL_SEC=30
 
 - `ASR_METRICS_ENABLED` 控制是否生成 ASR 统计日志
 - `ASR_METRICS_LOG_INTERVAL_SEC` 控制统计窗口长度
-- 当前默认 `LOG_FILE_MODE=concise` 时，周期性 metrics 不会写入文件
+- 当前默认 `LOG_FILE_MODE=minimal` 时，周期性 metrics 不会写入文件
 - 若要查看完整 metrics，建议临时切到 `LOG_FILE_MODE=verbose`，或把控制台切到 `LOG_CONSOLE_MODE=verbose`
 
 ### 日志配置项
@@ -463,7 +488,7 @@ LOG_CONSOLE_LEVEL=INFO
 LOG_CONSOLE_MODE=minimal
 LOG_FILE_ENABLED=true
 LOG_FILE_LEVEL=INFO
-LOG_FILE_MODE=concise
+LOG_FILE_MODE=minimal
 LOG_DIR=logs
 LOG_FILE_NAME=pipeline.log
 LOG_MAX_BYTES=5242880
@@ -472,13 +497,15 @@ LOG_BACKUP_COUNT=3
 
 说明：
 
-- 当前默认是“终端精简 + 文件精简”
+- 当前支持三档日志模式：`minimal`、`normal`、`verbose`
 - `LOG_CONSOLE_MODE=minimal` 时，终端只保留三类核心结果：
   - `[ASR final  ]: ...`
   - `[MT  ]: ...`
   - `HH:MM:SS [TTS] TTS provider | ...`
+- `LOG_CONSOLE_MODE=normal` 时，终端会额外显示主管线生命周期和 warning/error
 - `LOG_CONSOLE_MODE=verbose` 时，终端会恢复完整运行日志
-- `LOG_FILE_MODE=concise` 时，[`logs/pipeline.log`](/C:/Users/30909/Desktop/document/files/logs/pipeline.log) 只保留启动、就绪、结果链路以及所有 warning/error
+- `LOG_FILE_MODE=minimal` 时，[`logs/pipeline.log`](/C:/Users/30909/Desktop/document/files/logs/pipeline.log) 只保留核心结果和 warning/error
+- `LOG_FILE_MODE=normal` 时，文件会额外保留主管线生命周期和双 DeepSeek 场景分析链路
 - `LOG_FILE_MODE=verbose` 时，文件会保留完整 INFO 日志，包括启动细节、路由、AEC、metrics 等
 - `LOG_MAX_BYTES` 和 `LOG_BACKUP_COUNT` 控制滚动日志大小与保留份数
 
@@ -653,29 +680,30 @@ python record_voice.py --activate 2
 
 ### 文件日志默认输出
 
-当前默认 `LOG_FILE_MODE=concise`，详细日志写入：
+当前默认 `LOG_FILE_MODE=minimal`，详细日志写入：
 
 - [`logs/pipeline.log`](/C:/Users/30909/Desktop/document/files/logs/pipeline.log)
 
-默认会保留：
+`minimal` 默认会保留：
 
-- 主管线启动
-- `System ready - start speaking!`
 - `ASR final`
 - `MT result`
 - `TTS provider`
 - 所有 warning / error
 
-默认不会保留：
+`minimal` 默认不会保留：
 
-- 启动阶段的大量细节 INFO
+- 主管线启动细节 INFO
 - AEC / route / model 说明
 - 周期性 `[ASR metrics]`
+- 双 DeepSeek 的场景分析链路
 
 ### 需要完整日志时
 
 如果你想临时查看完整日志：
 
+- 终端适中输出：`LOG_CONSOLE_MODE=normal`
+- 文件适中输出：`LOG_FILE_MODE=normal`
 - 终端完整输出：`LOG_CONSOLE_MODE=verbose`
 - 文件完整输出：`LOG_FILE_MODE=verbose`
 
