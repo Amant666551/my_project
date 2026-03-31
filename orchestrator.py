@@ -27,7 +27,8 @@ import torch
 from dotenv import load_dotenv
 from pyrnnoise import RNNoise
 
-from aec import EchoCanceller
+from asr.aec import EchoCanceller
+from asr.hotword_manager import HotwordManager
 from main import speak as tts_speak
 
 load_dotenv()
@@ -132,6 +133,7 @@ class _ASRMetrics:
         self.finalized_speech_frames = 0
         self.final_count = 0
         self.final_char_sum = 0
+        self.hotword_rewrite_count = 0
         self.qwen_reconnect_count = 0
         self.asr_error_count = 0
 
@@ -164,6 +166,12 @@ class _ASRMetrics:
         with self._lock:
             self.final_count += 1
             self.final_char_sum += len(stripped)
+
+    def observe_hotword_rewrite(self) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self.hotword_rewrite_count += 1
 
     def observe_qwen_reconnect(self) -> None:
         if not self.enabled:
@@ -202,6 +210,7 @@ class _ASRMetrics:
                 "finalized_speech_frames": self.finalized_speech_frames,
                 "final_count": self.final_count,
                 "final_char_sum": self.final_char_sum,
+                "hotword_rewrite_count": self.hotword_rewrite_count,
                 "qwen_reconnect_count": self.qwen_reconnect_count,
                 "asr_error_count": self.asr_error_count,
             }
@@ -228,7 +237,8 @@ class _ASRMetrics:
             f"feed_decisions={snapshot['feed_decisions']} | feed_chunks={snapshot['feed_chunks']} | "
             f"avg_vad={avg_vad:.3f} | avg_rms={avg_rms:.4f} | avg_noise_floor={avg_noise_floor:.4f} | "
             f"avg_dynamic_threshold={avg_dynamic_threshold:.4f} | avg_utt_ms={avg_utt_ms:.0f} | "
-            f"avg_final_chars={avg_final_chars:.1f} | audio_overflows={_audio_overflow_count} | "
+            f"avg_final_chars={avg_final_chars:.1f} | hotword_rewrites={snapshot['hotword_rewrite_count']} | "
+            f"audio_overflows={_audio_overflow_count} | "
             f"audio_drops={_audio_drop_count} | asr_text_drops={_queue_drop_counts['asr_text']} | "
             f"tts_drops={_queue_drop_counts['tts']} | qwen_reconnects={snapshot['qwen_reconnect_count']} | "
             f"asr_errors={snapshot['asr_error_count']}"
@@ -236,6 +246,21 @@ class _ASRMetrics:
 
 
 _asr_metrics = _ASRMetrics()
+_hotword_manager = HotwordManager()
+
+
+def _postprocess_asr_final(text: str) -> str:
+    rewritten, hits = _hotword_manager.rewrite(text)
+    if not hits or rewritten == text:
+        return text
+
+    _asr_metrics.observe_hotword_rewrite()
+    hits_desc = ", ".join(f"{alias}->{canonical}" for alias, canonical in hits)
+    print(
+        "[ASR hotword] "
+        f"matches={hits_desc} | original={text} | rewritten={rewritten}"
+    )
+    return rewritten
 
 
 @dataclass
@@ -478,6 +503,7 @@ class LocalStreamingASR:
             if decision.should_reset:
                 return ""
             if final:
+                final = _postprocess_asr_final(final)
                 _asr_metrics.observe_final(final)
                 print(f"\n[ASR final  ]: {final}")
                 return final
@@ -582,6 +608,7 @@ class QwenStreamingASR:
                 self._conversation.append_audio(audio_b64)
         try:
             final = self._final_queue.get_nowait()
+            final = _postprocess_asr_final(final)
             _asr_metrics.observe_final(final)
             print(f"\n[ASR final  ]: {final}")
             return final
@@ -834,6 +861,7 @@ def main():
         "[ASR observability] "
         f"enabled={ASR_METRICS_ENABLED} | log_interval_sec={max(5, ASR_METRICS_LOG_INTERVAL_SEC)}"
     )
+    print(_hotword_manager.describe())
     print(
         "[ASR adaptive energy] "
         f"enabled={ADAPTIVE_ENERGY_ENABLED} | base_threshold={ENERGY_THRESHOLD:.4f} | "

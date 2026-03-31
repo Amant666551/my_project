@@ -4,7 +4,7 @@ import os
 
 import numpy as np
 
-from playback_bus import playback_bus
+from .playback_bus import playback_bus
 
 
 def _env_bool(name: str, default: bool) -> bool:

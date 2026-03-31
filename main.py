@@ -59,7 +59,7 @@ import redis
 import torch
 from dotenv import load_dotenv
 
-from audio_player import play_audio_file
+from asr.audio_player import play_audio_file
 
 # =============================================================================
 # USER CONFIGURATION

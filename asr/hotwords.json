@@ -1,0 +1,68 @@
+[
+  {
+    "canonical": "README",
+    "aliases": ["read me", "r e a d m e", "redmi", "readme"],
+    "category": "project_term",
+    "weight": 1.0,
+    "enabled": true
+  },
+  {
+    "canonical": "Qwen",
+    "aliases": ["千问", "q wen", "cue n"],
+    "category": "project_term",
+    "weight": 0.9,
+    "enabled": true
+  },
+  {
+    "canonical": "DeepSeek",
+    "aliases": ["deep seek", "deepsea", "deep sick"],
+    "category": "project_term",
+    "weight": 0.9,
+    "enabled": true
+  },
+  {
+    "canonical": "Zipformer",
+    "aliases": ["zip former", "zipform", "z form"],
+    "category": "project_term",
+    "weight": 0.8,
+    "enabled": true
+  },
+  {
+    "canonical": "RNNoise",
+    "aliases": ["r n noise", "rn noise"],
+    "category": "project_term",
+    "weight": 0.8,
+    "enabled": true
+  },
+  {
+    "canonical": "Silero",
+    "aliases": ["si lero", "silero vad"],
+    "category": "project_term",
+    "weight": 0.8,
+    "enabled": true
+  },
+  {
+    "canonical": "匡亚明",
+    "aliases": ["筐亚明", "康亚明"],
+    "pinyin": ["kuang", "ya", "ming"],
+    "category": "person",
+    "weight": 1.0,
+    "enabled": true
+  },
+  {
+    "canonical": "匡亚明学院",
+    "aliases": ["匡亚明学员", "矿亚明学院", "康亚明学院", "哈尔滨学院", "没有血缘"],
+    "pinyin": ["kuang", "ya", "ming", "xue", "yuan"],
+    "category": "organization",
+    "weight": 1.0,
+    "enabled": true
+  },
+  {
+    "canonical": "史铁生",
+    "aliases": ["史铁声", "史铁升"],
+    "pinyin": ["shi", "tie", "sheng"],
+    "category": "person",
+    "weight": 1.0,
+    "enabled": true
+  }
+]

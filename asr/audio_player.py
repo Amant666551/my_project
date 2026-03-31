@@ -9,7 +9,7 @@ from pathlib import Path
 import sounddevice as sd
 import soundfile as sf
 
-from playback_bus import playback_bus
+from .playback_bus import playback_bus
 
 
 PLAYER_CHUNK_SIZE = int(os.getenv("AEC_PLAYER_CHUNK_SIZE", "1024"))

@@ -1,0 +1,20 @@
+[
+  {
+    "name": "project_readme",
+    "path": "README.md",
+    "category": "project_term",
+    "enabled": true
+  },
+  {
+    "name": "campus_page_example",
+    "url": "https://example.edu.cn/college/example",
+    "category": "organization",
+    "enabled": false
+  },
+  {
+    "name": "person_page_example",
+    "url": "https://example.com/wiki/example-person",
+    "category": "person",
+    "enabled": false
+  }
+]

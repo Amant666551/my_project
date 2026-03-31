@@ -18,7 +18,7 @@
 
 ## 当前版本状态
 
-当前版本以 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 为主管线入口，已经完成了四类关键工作：
+当前版本以 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 为主管线入口，已经完成了六类关键工作：
 
 ### 1. ASR 前处理增强
 
@@ -49,19 +49,19 @@
 
 为了后续研究真正的全双工回声消除，本版本已经把 AEC 所需的接线骨架提前接进代码：
 
-- [`aec.py`](/C:/Users/30909/Desktop/document/files/aec.py)
-- [`playback_bus.py`](/C:/Users/30909/Desktop/document/files/playback_bus.py)
-- [`audio_player.py`](/C:/Users/30909/Desktop/document/files/audio_player.py)
+- [`asr/aec.py`](/C:/Users/30909/Desktop/document/files/asr/aec.py)
+- [`asr/playback_bus.py`](/C:/Users/30909/Desktop/document/files/asr/playback_bus.py)
+- [`asr/audio_player.py`](/C:/Users/30909/Desktop/document/files/asr/audio_player.py)
 
 当前状态下：
 
 - TTS 播放优先走受控播放链路
 - 播放中的音频会被写入 `playback_bus`
-- 麦克风输入会先经过 `aec.py`，再进入当前前处理链路
+- 麦克风输入会先经过 `asr/aec.py`，再进入当前前处理链路
 
 注意：
 
-- 这一版已经在 [`aec.py`](/C:/Users/30909/Desktop/document/files/aec.py) 中接入了真实 AEC 后端实验分支，当前实验后端是 `pyaec`
+- 这一版已经在 [`asr/aec.py`](/C:/Users/30909/Desktop/document/files/asr/aec.py) 中接入了真实 AEC 后端实验分支，当前实验后端是 `pyaec`
 - 经当前机器实测，`pyaec` 在外放双讲场景下会误伤近端人声，因此当前推荐默认保持 `ENABLE_AEC=false`
 - 这一步的目标是在不改 ASR / MT / TTS 模型选型的前提下，把外放全双工所需的 AEC 接口与播放参考链路先接通并验证
 
@@ -73,6 +73,38 @@
 - 统计起说次数、final 次数、短句重置次数、平均句长
 - 统计 `audio overflow`、队列丢弃、Qwen 重连、ASR worker 错误
 - 统计 `avg_vad`、`avg_rms`、`avg_noise_floor`、`avg_dynamic_threshold`
+
+### 5. 第二版 ASR 热词增强已接入
+
+当前版本已经加入第二版热词后处理层：
+
+- 热词库文件：[`asr/hotwords.json`](/C:/Users/30909/Desktop/document/files/asr/hotwords.json)
+- 热词管理模块：[`asr/hotword_manager.py`](/C:/Users/30909/Desktop/document/files/asr/hotword_manager.py)
+- 接入位置：`ASR final -> 热词后处理 -> MT`
+
+当前设计原则：
+
+- 当前默认关闭，避免把本来正确的句子误改坏
+- 仅支持人工维护热词库
+- 第一层做保守的 alias -> canonical 替换
+- 第二层做保守的中文拼音近似匹配
+- 不依赖数据库
+- 不做自动联网抓词后直接生效
+
+### 6. 第三版热词候选学习脚手架已接入
+
+当前版本已经加入第三版候选词学习脚手架：
+
+- 来源配置：[`asr/hotword_sources.json`](/C:/Users/30909/Desktop/document/files/asr/hotword_sources.json)
+- 候选池：[`asr/hotword_candidates.json`](/C:/Users/30909/Desktop/document/files/asr/hotword_candidates.json)
+- 学习脚本：[`asr/hotword_learner.py`](/C:/Users/30909/Desktop/document/files/asr/hotword_learner.py)
+
+当前设计原则：
+
+- 自动从本地文件或指定网页抽取候选词
+- 先写入候选池，不直接进入正式热词库
+- 记录来源、上下文、分数、拼音和出现次数
+- 不依赖数据库
 
 ## 已验证结论
 
@@ -118,9 +150,16 @@
 files/
 - orchestrator.py          # 主管线：采音 + ASR + MT + TTS 的并行调度
 - main.py                  # TTS 后端与播放逻辑
-- aec.py                   # AEC 接口层，已预接 pyaec backend，未启用时安全透传
-- playback_bus.py          # 播放参考音频环形缓冲
-- audio_player.py          # 受控音频播放，负责把 render reference 写入 playback_bus
+- asr/
+  - __init__.py
+  - aec.py                 # AEC 接口层，已预接 pyaec backend，未启用时安全透传
+  - playback_bus.py        # 播放参考音频环形缓冲
+  - audio_player.py        # 受控音频播放，负责把 render reference 写入 playback_bus
+  - hotword_manager.py     # 第二版热词管理与后处理
+  - hotwords.json          # 第二版本地热词库
+  - hotword_sources.json   # 第三版候选词来源配置
+  - hotword_candidates.json# 第三版候选词池
+  - hotword_learner.py     # 第三版候选词学习脚本
 - api.py                   # 前端服务、控制接口、本地翻译接口
 - translator.py            # 本地翻译模型封装
 - record_voice.py          # 录音、创建 voice、激活 voice
@@ -222,7 +261,7 @@ python orchestrator.py
 - Qwen ASR websocket 断线后的自动重连
 - AEC 接口层接入点
 
-### `aec.py`
+### `asr/aec.py`
 
 负责 AEC 接口封装：
 
@@ -233,7 +272,7 @@ python orchestrator.py
 
 当前默认后端是透传，不改变音频。
 
-### `playback_bus.py`
+### `asr/playback_bus.py`
 
 负责 render reference 管理：
 
@@ -241,7 +280,7 @@ python orchestrator.py
 - 维护播放状态
 - 为未来真实 AEC 后端提供参考音频
 
-### `audio_player.py`
+### `asr/audio_player.py`
 
 负责受控播放：
 
@@ -256,7 +295,7 @@ python orchestrator.py
 - 优先尝试 `Qwen TTS API`
 - 失败时回退到本地后端
 - 当前本地回退默认是 `XTTS`
-- 播放环节已经接到 [`audio_player.py`](/C:/Users/30909/Desktop/document/files/audio_player.py)
+- 播放环节已经接到 [`asr/audio_player.py`](/C:/Users/30909/Desktop/document/files/asr/audio_player.py)
 
 ### `api.py`
 
@@ -381,6 +420,38 @@ ADAPTIVE_ENERGY_VAD_CEILING=0.12
 - 只有在“当前不在说话”且 `vad_prob` 足够低时，系统才会更新噪声底估计
 - 动态门限不会低于基础 `ENERGY_THRESHOLD`
 
+### ASR 热词增强配置项
+
+```env
+HOTWORD_REWRITE_ENABLED=false
+HOTWORD_MAX_REPLACEMENTS=2
+HOTWORD_PINYIN_ENABLED=false
+HOTWORD_PINYIN_MIN_SCORE=0.88
+HOTWORD_PINYIN_MAX_REPLACEMENTS=1
+```
+
+说明：
+
+- `HOTWORD_REWRITE_ENABLED` 控制是否启用热词后处理，当前推荐默认保持 `false`
+- `HOTWORD_MAX_REPLACEMENTS` 控制单句最多替换次数，默认保守限制为 `2`
+- `HOTWORD_PINYIN_ENABLED` 控制是否启用第二版拼音近似匹配，当前推荐默认保持 `false`
+- `HOTWORD_PINYIN_MIN_SCORE` 控制拼音近似匹配阈值
+- `HOTWORD_PINYIN_MAX_REPLACEMENTS` 控制单句最多执行几次拼音近似替换
+
+### ASR 候选词学习配置项
+
+```env
+HOTWORD_SOURCE_TIMEOUT_SEC=12
+HOTWORD_CANDIDATE_CONTEXT_LIMIT=3
+HOTWORD_AUTO_PROMOTE_THRESHOLD=0.93
+```
+
+说明：
+
+- `HOTWORD_SOURCE_TIMEOUT_SEC` 控制网页抓取超时时间
+- `HOTWORD_CANDIDATE_CONTEXT_LIMIT` 控制每个候选词保留多少条上下文
+- `HOTWORD_AUTO_PROMOTE_THRESHOLD` 当前只用于标记 `suggest_promote`，不会直接自动写入正式热词库
+
 ## 当前主管线关键运行参数
 
 这些值由 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 控制：
@@ -496,6 +567,7 @@ python record_voice.py --activate 2
 
 - `[Pipeline config] ...`
 - `[ASR observability] enabled=... | log_interval_sec=...`
+- `[ASR hotwords] enabled=... | entries=... | aliases=... | pinyin_enabled=...`
 - `[ASR adaptive energy] enabled=... | base_threshold=...`
 - `[MT model ] provider=deepseek | model=deepseek-chat`
 - 或 `[MT model ] provider=local_api | url=...`
@@ -510,6 +582,7 @@ python record_voice.py --activate 2
 运行中：
 
 - `[ASR final  ]: ...`
+- `[ASR hotword] matches=... | original=... | rewritten=...`
 - `[ASR metrics] ...`
 - `[MT  ]: ...`
 - `[TTS] INFO    TTS provider | provider=qwen_api | model=...`
@@ -523,7 +596,7 @@ python record_voice.py --activate 2
 
 ### 1. 外放场景尚未具备真正稳定的全双工能力
 
-虽然并行流水线和 AEC 接口骨架已经完成，`aec.py` 里也已经接入了 `pyaec` 实验分支，但当前机器实测表明：开启 `pyaec` 后，双讲时近端人声会被明显抑制；关闭 AEC 反而更容易识别出用户插话。
+虽然并行流水线和 AEC 接口骨架已经完成，`asr/aec.py` 里也已经接入了 `pyaec` 实验分支，但当前机器实测表明：开启 `pyaec` 后，双讲时近端人声会被明显抑制；关闭 AEC 反而更容易识别出用户插话。
 
 这说明当前阶段的问题主要不在“接口没接上”，而在“当前 AEC 后端能力不足以支撑稳定的外放双讲”。耳机测试和 AEC on/off 对照测试都支持这一判断。
 
@@ -549,15 +622,49 @@ python record_voice.py --activate 2
 
 当前代码已经对 Qwen ASR 空闲断线做了自动重连；Qwen TTS 失败时会自动回退到本地 XTTS。
 
-### 4. 本地 VAD 初始化仍可能受网络影响
+### 4. 第二版热词增强仍是保守规则层
+
+当前热词增强不是模型级 biasing，而是 `ASR final` 后的保守重写层。这意味着：
+
+- 适合修正少量稳定专名、术语和项目词
+- 适合对中文专名做有限的拼音近似纠偏
+- 不适合替代真正的模型级热词注入
+- 当前更适合作为轻量增强，而不是大规模自动学习系统
+
+### 5. 第三版候选词学习当前只做“发现”，不做“自动生效”
+
+当前 [`asr/hotword_learner.py`](/C:/Users/30909/Desktop/document/files/asr/hotword_learner.py) 会从：
+
+- 本地文本文件
+- 指定网页
+
+中抽取候选专名、术语和机构名，并写入 [`asr/hotword_candidates.json`](/C:/Users/30909/Desktop/document/files/asr/hotword_candidates.json)。
+
+当前阶段它不会自动改线上热词库，目的是先让系统具备“自动发现词汇”的能力，同时避免误学后直接污染识别。
+
+### 6. 如何运行第三版候选词学习
+
+在项目根目录执行：
+
+```powershell
+python -m asr.hotword_learner
+```
+
+默认行为：
+
+- 读取 [`asr/hotword_sources.json`](/C:/Users/30909/Desktop/document/files/asr/hotword_sources.json)
+- 跳过已经存在于 [`asr/hotwords.json`](/C:/Users/30909/Desktop/document/files/asr/hotwords.json) 里的正式热词
+- 将新发现的候选项写入 [`asr/hotword_candidates.json`](/C:/Users/30909/Desktop/document/files/asr/hotword_candidates.json)
+
+### 7. 本地 VAD 初始化仍可能受网络影响
 
 当前 `Silero VAD` 通过 `torch.hub.load(...)` 初始化。在某些环境下，如果本地缓存不可用，初始化阶段仍可能访问网络。
 
 如果后续要继续提升稳定性，可以考虑把这部分彻底本地化。
 
-### 5. 受控播放仍可能因格式或设备问题回退到旧播放器
+### 8. 受控播放仍可能因格式或设备问题回退到旧播放器
 
-当前 [`audio_player.py`](/C:/Users/30909/Desktop/document/files/audio_player.py) 会优先尝试受控播放；如果失败，仍会回退到旧的黑盒播放器。
+当前 [`asr/audio_player.py`](/C:/Users/30909/Desktop/document/files/asr/audio_player.py) 会优先尝试受控播放；如果失败，仍会回退到旧的黑盒播放器。
 
 这意味着：
 
