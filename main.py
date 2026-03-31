@@ -73,7 +73,7 @@ from asr.audio_player import play_audio_file
 # USER CONFIGURATION
 # =============================================================================
 
-load_dotenv()
+load_dotenv(override=True)
 configure_logging()
 
 TTS_BACKEND = "xtts"                          # "xtts" | "openvoice" | "edge"

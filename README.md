@@ -18,7 +18,7 @@
 
 ## 当前版本状态
 
-当前版本以 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 为主管线入口，已经完成了六类关键工作：
+当前版本以 [`orchestrator.py`](/C:/Users/30909/Desktop/document/files/orchestrator.py) 为主管线入口，已经完成了七类关键工作：
 
 ### 1. ASR 前处理增强
 
@@ -106,6 +106,21 @@
 - 记录来源、上下文、分数、拼音和出现次数
 - 不依赖数据库
 
+### 7. MT 语境感知提示词工程已接入
+
+当前版本已经把 MT 从“词表增强”路线切换为“语境 prompt 工程”路线：
+
+- 模块位置：[`mt/prompt_context.py`](/C:/Users/30909/Desktop/document/files/mt/prompt_context.py)
+- 接入位置：DeepSeek MT 请求前的 `system prompt` 构建
+- 当前策略：根据最近几轮对话、口语特征、问句语气和话题领域，为模型补充消歧语境
+
+当前设计原则：
+
+- 不额外维护外部 MT 术语知识库
+- 不对 MT 输出做硬编码词表替换
+- 优先依赖 DeepSeek 本身的翻译与术语能力
+- 通过最近对话上下文提升专名、代词和口语碎片的理解稳定性
+
 ## 已验证结论
 
 ### 1. 并行流水线是有效的
@@ -160,6 +175,9 @@ files/
   - hotword_sources.json   # 第三版候选词来源配置
   - hotword_candidates.json# 第三版候选词池
   - hotword_learner.py     # 第三版候选词学习脚本
+- mt/
+  - __init__.py
+  - prompt_context.py      # MT 语境感知 prompt 构建
 - api.py                   # 前端服务、控制接口、本地翻译接口
 - translator.py            # 本地翻译模型封装
 - record_voice.py          # 录音、创建 voice、激活 voice
@@ -297,6 +315,21 @@ python orchestrator.py
 - 当前本地回退默认是 `XTTS`
 - 播放环节已经接到 [`asr/audio_player.py`](/C:/Users/30909/Desktop/document/files/asr/audio_player.py)
 
+### `mt/prompt_context.py`
+
+负责 MT 语境感知 prompt 构建：
+
+- 缓存最近几轮对话的源文本与译文
+- 根据当前句子判断口语特征、问句语气、可能的话题领域
+- 给 DeepSeek MT 注入“只用于消歧”的上下文提示
+
+当前设计原则：
+
+- 不维护外部术语知识库
+- 不对 MT 输出做硬编码词表替换
+- 优先依赖大模型本身的术语能力
+- 通过最近对话语境和提示词工程提升一致性与自然度
+
 ### `api.py`
 
 负责控制台和辅助接口：
@@ -356,6 +389,21 @@ MT_SOURCE_LANG=zh
 MT_TARGET_LANG=en
 MT_TIMEOUT_SEC=8
 ```
+
+MT 语境 prompt 配置：
+
+```env
+MT_CONTEXT_ENABLED=true
+MT_CONTEXT_MAX_TURNS=3
+MT_CONTEXT_MAX_CHARS_PER_TURN=80
+```
+
+说明：
+
+- `MT_CONTEXT_ENABLED` 控制是否启用语境感知 prompt
+- `MT_CONTEXT_MAX_TURNS` 控制最多带入多少轮近期上下文
+- `MT_CONTEXT_MAX_CHARS_PER_TURN` 控制每轮上下文写入 prompt 前的截断长度
+- 这套方案的目标不是“词表纠错”，而是“利用对话语境帮助模型消歧”
 
 ### TTS
 

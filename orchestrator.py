@@ -30,8 +30,9 @@ from pyrnnoise import RNNoise
 from app_logging import configure_logging, default_log_path, get_logger
 from asr.aec import EchoCanceller
 from asr.hotword_manager import HotwordManager
+from mt.prompt_context import MTPromptContext
 
-load_dotenv()
+load_dotenv(override=True)
 configure_logging()
 
 bootstrap_log = get_logger("BOOT")
@@ -124,6 +125,7 @@ audio_log = get_logger("Audio")
 queue_log = get_logger("Queue")
 metrics_log = get_logger("ASR.METRICS")
 hotword_log = get_logger("ASR.HOTWORD")
+mt_context_log = get_logger("MT.CONTEXT")
 
 
 class _ASRMetrics:
@@ -278,6 +280,7 @@ class _ASRMetrics:
 
 _asr_metrics = _ASRMetrics()
 _hotword_manager = HotwordManager()
+_mt_prompt_context = MTPromptContext()
 
 
 def _postprocess_asr_final(text: str) -> str:
@@ -289,6 +292,17 @@ def _postprocess_asr_final(text: str) -> str:
     hits_desc = ", ".join(f"{alias}->{canonical}" for alias, canonical in hits)
     hotword_log.info("matches=%s | original=%s | rewritten=%s", hits_desc, text, rewritten)
     return rewritten
+
+
+def _mt_context_prompt(text: str) -> str:
+    prompt = _mt_prompt_context.build_prompt(text, MT_SOURCE_LANG, MT_TARGET_LANG)
+    if prompt:
+        mt_context_log.info("prompt_built | text=%s", text)
+    return prompt
+
+
+def _mt_remember_turn(text: str, translated: str) -> None:
+    _mt_prompt_context.observe_turn(text, translated)
 
 
 @dataclass
@@ -689,6 +703,7 @@ def _translate_local(text: str) -> str | None:
         resp.raise_for_status()
         result = resp.json().get("translated_text", "").strip()
         if result:
+            _mt_remember_turn(text, result)
             mt_log.info("result | text=%s", result)
         return result or None
     except requests.exceptions.Timeout:
@@ -700,6 +715,10 @@ def _translate_local(text: str) -> str | None:
 
 
 def _translate_deepseek(text: str) -> str | None:
+    context_prompt = _mt_context_prompt(text)
+    prompt_suffix = ""
+    if context_prompt:
+        prompt_suffix = "\n\n" + context_prompt
     try:
         source_name = LANGUAGE_NAME_MAP.get(MT_SOURCE_LANG, MT_SOURCE_LANG)
         target_name = LANGUAGE_NAME_MAP.get(MT_TARGET_LANG, MT_TARGET_LANG)
@@ -721,7 +740,9 @@ def _translate_deepseek(text: str) -> str | None:
                         "Do not explain anything. "
                         "Do not add quotation marks or notes. "
                         "If the input is already in the target language, return it unchanged. "
-                        "If the input is a fragment, translate only that fragment."
+                        "If the input is a fragment, translate only that fragment. "
+                        "Keep proper nouns and domain terms consistent across turns. "
+                        f"{prompt_suffix}"
                     ),
                 },
                 {
@@ -743,6 +764,7 @@ def _translate_deepseek(text: str) -> str | None:
         data = resp.json()
         result = data["choices"][0]["message"]["content"].strip()
         if result:
+            _mt_remember_turn(text, result)
             mt_log.info("result | text=%s", result)
         return result or None
     except requests.exceptions.Timeout:
@@ -917,6 +939,7 @@ def main():
         )
     else:
         mt_log.info("model | provider=deepseek | model=%s", DEEPSEEK_MODEL)
+    mt_context_log.info(_mt_prompt_context.describe())
 
     asr = build_asr_backend()
     stop_event = threading.Event()
