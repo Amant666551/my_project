@@ -2,6 +2,7 @@
 models/
 .env
 voice_samples/
+logs/
 img.png
 
 __pycache__/
