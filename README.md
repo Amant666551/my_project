@@ -495,6 +495,40 @@ LOG_MAX_BYTES=5242880
 LOG_BACKUP_COUNT=3
 ```
 
+### Global API-only Switch
+```env
+API_ONLY=true
+```
+
+When `API_ONLY=true`:
+- ASR uses remote API only
+- MT uses remote API only
+- TTS uses remote API only
+- local fallback backends are not initialized at startup
+- missing local XTTS files or missing `models/zipformer` will not block startup
+
+Recommended API-only config:
+```env
+API_ONLY=true
+USE_QWEN_ASR_API=true
+USE_QWEN_TTS_API=true
+USE_LOCAL_MT=false
+```
+
+If you want API + local fallback again:
+```env
+API_ONLY=false
+ASR_MODE=api_local_fallback
+TTS_MODE=api_local_fallback
+USE_LOCAL_MT=false
+```
+
+Notes:
+- `API_ONLY=true` has higher priority than `ASR_MODE` and `TTS_MODE`
+- `ASR_MODE` and `TTS_MODE` are still available for per-stage control when `API_ONLY=false`
+- supported fallback aliases include `api_local_fallback`, `api-local-fallback`, and `api+local`
+- in API-only mode, logs should not show local fallback startup or local model route info
+
 说明：
 
 - 当前支持三档日志模式：`minimal`、`normal`、`verbose`
@@ -505,8 +539,25 @@ LOG_BACKUP_COUNT=3
 - `LOG_CONSOLE_MODE=normal` 时，终端会额外显示主管线生命周期和 warning/error
 - `LOG_CONSOLE_MODE=verbose` 时，终端会恢复完整运行日志
 - `LOG_FILE_MODE=minimal` 时，[`logs/pipeline.log`](/C:/Users/30909/Desktop/document/files/logs/pipeline.log) 只保留核心结果和 warning/error
+- `LOG_FILE_MODE=minimal` 时，也会额外保留每句的 latency 汇总，方便排查时延
 - `LOG_FILE_MODE=normal` 时，文件会额外保留主管线生命周期和双 DeepSeek 场景分析链路
 - `LOG_FILE_MODE=verbose` 时，文件会保留完整 INFO 日志，包括启动细节、路由、AEC、metrics 等
+
+Latency 日志格式：
+
+```text
+trace | id=12 | asr_latency_ms=... | asr_first_partial_ms=... | asr_final_tail_ms=... | mt_scene_analyzer_latency_ms=... | mt_translator_latency_ms=... | tts_latency_ms=... | end_to_end_latency_ms=... | scene_cache_hit=False | partials=...
+```
+
+说明：
+- `asr_latency_ms`：从当前句进入语音段到前端判定该句结束的耗时
+- `asr_first_partial_ms`：从当前句进入语音段到第一次出现 partial 文本的耗时
+- `asr_final_tail_ms`：前端判定该句结束后，到拿到最终 ASR 文本的收尾耗时
+- `mt_scene_analyzer_latency_ms`：场景分析器实际调用耗时；如果命中缓存则通常为 `0`
+- `mt_translator_latency_ms`：翻译阶段耗时
+- `tts_latency_ms`：TTS 从开始请求到音频可播放的耗时
+- `end_to_end_latency_ms`：从当前句进入 ASR 到 TTS 音频可播放的总耗时
+- `partials`：当前句记录到的 partial 更新次数
 - `LOG_MAX_BYTES` 和 `LOG_BACKUP_COUNT` 控制滚动日志大小与保留份数
 
 ### ASR 自适应门限配置项

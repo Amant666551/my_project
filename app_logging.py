@@ -89,6 +89,14 @@ def _is_mt_context_record(record: logging.LogRecord, message: str) -> bool:
     )
 
 
+def _is_latency_record(record: logging.LogRecord, message: str) -> bool:
+    return record.name == f"{_APP_LOGGER_PREFIX}.LATENCY" and message.startswith("trace |")
+
+
+def _is_asr_partial_record(record: logging.LogRecord, message: str) -> bool:
+    return record.name == f"{_APP_LOGGER_PREFIX}.ASR" and message.startswith("partial | text=")
+
+
 class _MinimalConsoleFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
@@ -111,6 +119,8 @@ class _MinimalFileFilter(logging.Filter):
         message = record.getMessage()
         if _is_core_result_record(record, message):
             return True
+        if _is_latency_record(record, message):
+            return True
         return False
 
 
@@ -125,6 +135,10 @@ class _NormalFileFilter(logging.Filter):
         if _is_pipeline_lifecycle_record(record, message):
             return True
         if _is_mt_context_record(record, message):
+            return True
+        if _is_latency_record(record, message):
+            return True
+        if _is_asr_partial_record(record, message):
             return True
 
         return False

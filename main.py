@@ -45,6 +45,7 @@ import tempfile
 import threading
 import time
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -77,13 +78,39 @@ from asr.audio_player import play_audio_file
 
 configure_logging()
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_tts_mode(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    aliases = {
+        "api_only": "api_only",
+        "api-only": "api_only",
+        "api": "api_only",
+        "remote_only": "api_only",
+        "api_local_fallback": "api_local_fallback",
+        "api-local-fallback": "api_local_fallback",
+        "api+local": "api_local_fallback",
+        "api+local_fallback": "api_local_fallback",
+        "fallback": "api_local_fallback",
+    }
+    return aliases.get(normalized, "api_only")
+
 TTS_BACKEND = "xtts"                          # "xtts" | "openvoice" | "edge"
+GLOBAL_API_ONLY = _env_bool("API_ONLY", False)
+TTS_MODE = "api_only" if GLOBAL_API_ONLY else _normalize_tts_mode(os.getenv("TTS_MODE", "api_only"))
 VOICE_SAMPLE = os.getenv(
     "VOICE_SAMPLE",
     "voice_samples/my_voice.wav",
 )                                              # reference clip for cloning
 PROXY = None                                  # e.g. "http://127.0.0.1:7890"
 USE_QWEN_TTS_API = os.getenv("USE_QWEN_TTS_API", "false").lower() == "true"
+API_ONLY_TTS = TTS_MODE == "api_only"
 
 QWEN_TTS_MODEL = os.getenv("QWEN_TTS_MODEL", "qwen3-tts-vc-2026-01-22")
 QWEN_TTS_VOICE = os.getenv("QWEN_TTS_VOICE", "").strip()
@@ -119,6 +146,14 @@ RETRY_DELAY = 1.0
 # =============================================================================
 
 log = get_logger("TTS")
+
+
+@dataclass(frozen=True)
+class TTSTiming:
+    provider: str
+    mode: str
+    provider_ready_ms: float
+    total_ms: float
 log.info("startup | configuring TTS backends")
 
 _cpu_count = os.cpu_count() or 4
@@ -664,23 +699,34 @@ def _load_backend():
     raise ValueError(f"Unknown TTS_BACKEND '{TTS_BACKEND}'.")
 
 
-log.info("startup | loading fallback backend=%s", TTS_BACKEND)
-_backend = _load_backend()
 _qwen_tts_backend = None
+_backend = None
+
 if USE_QWEN_TTS_API:
+    log.info("startup | loading primary backend=qwen_api")
     try:
-        log.info("startup | loading primary backend=qwen_api")
         _qwen_tts_backend = _QwenTTSAPIBackend()
     except Exception as exc:
+        if API_ONLY_TTS:
+            raise RuntimeError(
+                f"Qwen TTS API backend failed to initialize in API-only mode: {exc}"
+            ) from exc
         log.warning(
             "Qwen TTS API backend disabled at startup, local backend will be used instead: %s",
             exc,
         )
+elif API_ONLY_TTS:
+    raise RuntimeError("TTS_MODE=api_only requires USE_QWEN_TTS_API=true")
+
+if not API_ONLY_TTS:
+    log.info("startup | loading fallback backend=%s", TTS_BACKEND)
+    _backend = _load_backend()
 
 log.info(
-    "TTS startup | primary=%s | fallback=%s",
-    "qwen_api" if USE_QWEN_TTS_API and _qwen_tts_backend is not None else TTS_BACKEND,
-    TTS_BACKEND if USE_QWEN_TTS_API else "none",
+    "TTS startup | mode=%s | primary=%s | fallback=%s",
+    TTS_MODE,
+    "qwen_api" if _qwen_tts_backend is not None else "none",
+    TTS_BACKEND if _backend is not None else "none",
 )
 
 
@@ -696,10 +742,11 @@ def _play_file(path: str) -> None:
 # Public API
 # =============================================================================
 
-def speak(text: str, lang: str = "en") -> None:
+def speak(text: str, lang: str = "en") -> TTSTiming | None:
     if not text or not text.strip():
-        return
+        return None
 
+    start_time = time.perf_counter()
     try:
         if USE_QWEN_TTS_API and _qwen_tts_backend is not None:
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -708,15 +755,25 @@ def speak(text: str, lang: str = "en") -> None:
             try:
                 ok = _qwen_tts_backend.synthesize(text, lang, path)
                 if not ok:
+                    if API_ONLY_TTS:
+                        log.error("Qwen TTS API failed and API-only mode is enabled.")
+                        return None
                     log.warning("Qwen TTS API failed, falling back to local backend.")
                 else:
                     size = Path(path).stat().st_size if Path(path).exists() else 0
                     if size < 100:
                         log.error("Qwen TTS output too small (%d B).", size)
                     else:
+                        provider_ready_ms = (time.perf_counter() - start_time) * 1000.0
                         log.info("TTS provider | provider=qwen_api | model=%s", QWEN_TTS_MODEL)
                         _play_file(path)
-                        return
+                        total_ms = (time.perf_counter() - start_time) * 1000.0
+                        return TTSTiming(
+                            provider="qwen_api",
+                            mode="file",
+                            provider_ready_ms=provider_ready_ms,
+                            total_ms=total_ms,
+                        )
             finally:
                 try:
                     if os.path.exists(path):
@@ -724,10 +781,20 @@ def speak(text: str, lang: str = "en") -> None:
                 except OSError:
                     pass
 
+        if _backend is None:
+            log.error("No TTS backend available for fallback.")
+            return None
+
         if TTS_BACKEND == "xtts":
             if _backend.synthesize_streaming(text, lang):
                 log.info("TTS provider | provider=xtts | mode=streaming")
-                return
+                total_ms = (time.perf_counter() - start_time) * 1000.0
+                return TTSTiming(
+                    provider="xtts",
+                    mode="streaming",
+                    provider_ready_ms=total_ms,
+                    total_ms=total_ms,
+                )
 
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             path = tmp.name
@@ -736,14 +803,21 @@ def speak(text: str, lang: str = "en") -> None:
                 ok = _backend.synthesize_to_file(text, lang, path)
                 if not ok:
                     log.error("XTTS fallback synthesis failed - skipping.")
-                    return
+                    return None
                 size = Path(path).stat().st_size if Path(path).exists() else 0
                 if size < 100:
                     log.error("XTTS fallback output too small (%d B).", size)
-                    return
+                    return None
+                provider_ready_ms = (time.perf_counter() - start_time) * 1000.0
                 log.info("TTS provider | provider=xtts | mode=file")
                 _play_file(path)
-                return
+                total_ms = (time.perf_counter() - start_time) * 1000.0
+                return TTSTiming(
+                    provider="xtts",
+                    mode="file",
+                    provider_ready_ms=provider_ready_ms,
+                    total_ms=total_ms,
+                )
             finally:
                 try:
                     if os.path.exists(path):
@@ -764,15 +838,23 @@ def speak(text: str, lang: str = "en") -> None:
 
             if not ok:
                 log.error("Synthesis failed - skipping.")
-                return
+                return None
 
             size = Path(path).stat().st_size if Path(path).exists() else 0
             if size < 100:
                 log.error("Output too small (%d B).", size)
-                return
+                return None
 
+            provider_ready_ms = (time.perf_counter() - start_time) * 1000.0
             log.info("TTS provider | provider=%s", TTS_BACKEND)
             _play_file(path)
+            total_ms = (time.perf_counter() - start_time) * 1000.0
+            return TTSTiming(
+                provider=TTS_BACKEND,
+                mode="file",
+                provider_ready_ms=provider_ready_ms,
+                total_ms=total_ms,
+            )
         finally:
             try:
                 if os.path.exists(path):
@@ -782,6 +864,7 @@ def speak(text: str, lang: str = "en") -> None:
 
     except Exception as exc:
         log.error("speak() error: %s", exc)
+        return None
 
 
 # =============================================================================
@@ -802,7 +885,12 @@ def run_as_service() -> None:
     )
     pubsub = redis_client.pubsub()
     pubsub.subscribe(INPUT_CHANNEL)
-    log.info("TTS service ready | primary=%s", "qwen_api" if USE_QWEN_TTS_API and _qwen_tts_backend is not None else TTS_BACKEND)
+    log.info(
+        "TTS service ready | mode=%s | primary=%s | fallback=%s",
+        TTS_MODE,
+        "qwen_api" if _qwen_tts_backend is not None else "none",
+        TTS_BACKEND if _backend is not None else "none",
+    )
 
     pending: list[tuple[str, str]] = []
     try:

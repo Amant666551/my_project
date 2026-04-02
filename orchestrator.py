@@ -18,10 +18,10 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from itertools import count
 
 import numpy as np
 import requests
-import sherpa_onnx
 import sounddevice as sd
 import torch
 from dotenv import load_dotenv
@@ -45,8 +45,34 @@ from main import speak as tts_speak
 bootstrap_log.info("startup | TTS module imported")
 
 
-USE_LOCAL_MT = os.getenv("USE_LOCAL_MT", "false").lower() == "true"
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_asr_mode(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    aliases = {
+        "api_only": "api_only",
+        "api-only": "api_only",
+        "api": "api_only",
+        "remote_only": "api_only",
+        "api_local_fallback": "api_local_fallback",
+        "api-local-fallback": "api_local_fallback",
+        "api+local": "api_local_fallback",
+        "api+local_fallback": "api_local_fallback",
+        "fallback": "api_local_fallback",
+    }
+    return aliases.get(normalized, "api_only")
+
+
+GLOBAL_API_ONLY = _env_bool("API_ONLY", False)
+USE_LOCAL_MT = False if GLOBAL_API_ONLY else _env_bool("USE_LOCAL_MT", False)
 USE_QWEN_ASR_API = os.getenv("USE_QWEN_ASR_API", "false").lower() == "true"
+ASR_MODE = "api_only" if GLOBAL_API_ONLY else _normalize_asr_mode(os.getenv("ASR_MODE", "api_only"))
+API_ONLY_ASR = ASR_MODE == "api_only"
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 if not USE_LOCAL_MT and not DEEPSEEK_API_KEY:
@@ -127,11 +153,90 @@ LANGUAGE_NAME_MAP = {
 pipeline_log = get_logger("PIPELINE")
 asr_log = get_logger("ASR")
 mt_log = get_logger("MT")
+latency_log = get_logger("LATENCY")
 audio_log = get_logger("Audio")
 queue_log = get_logger("Queue")
 metrics_log = get_logger("ASR.METRICS")
 hotword_log = get_logger("ASR.HOTWORD")
 mt_context_log = get_logger("MT.CONTEXT")
+
+
+_trace_counter = count(1)
+
+
+def _now() -> float:
+    return time.perf_counter()
+
+
+def _elapsed_ms(start: float, end: float) -> float:
+    if start <= 0.0 or end <= 0.0 or end < start:
+        return 0.0
+    return (end - start) * 1000.0
+
+
+@dataclass
+class _PipelineTrace:
+    trace_id: int
+    asr_started_at: float = 0.0
+    asr_speech_end_at: float = 0.0
+    asr_first_partial_at: float = 0.0
+    asr_last_partial_at: float = 0.0
+    asr_partial_count: int = 0
+    asr_final_at: float = 0.0
+    mt_scene_started_at: float = 0.0
+    mt_scene_done_at: float = 0.0
+    mt_scene_cache_hit: bool = False
+    mt_translate_started_at: float = 0.0
+    mt_translate_done_at: float = 0.0
+    tts_started_at: float = 0.0
+    tts_ready_at: float = 0.0
+    tts_done_at: float = 0.0
+
+
+@dataclass
+class _ASRTextEvent:
+    text: str
+    trace: _PipelineTrace
+
+
+@dataclass
+class _TTSEvent:
+    text: str
+    lang: str
+    trace: _PipelineTrace
+
+
+def _new_trace() -> _PipelineTrace:
+    return _PipelineTrace(trace_id=next(_trace_counter))
+
+
+def _log_trace_latency(trace: _PipelineTrace) -> None:
+    latency_log.info(
+        "trace | id=%s | asr_latency_ms=%.1f | asr_first_partial_ms=%.1f | asr_final_tail_ms=%.1f | "
+        "mt_scene_analyzer_latency_ms=%.1f | mt_translator_latency_ms=%.1f | tts_latency_ms=%.1f | "
+        "end_to_end_latency_ms=%.1f | scene_cache_hit=%s | partials=%s",
+        trace.trace_id,
+        _elapsed_ms(trace.asr_started_at, trace.asr_speech_end_at or trace.asr_final_at),
+        _elapsed_ms(trace.asr_started_at, trace.asr_first_partial_at),
+        _elapsed_ms(trace.asr_speech_end_at, trace.asr_final_at),
+        _elapsed_ms(trace.mt_scene_started_at, trace.mt_scene_done_at),
+        _elapsed_ms(trace.mt_translate_started_at, trace.mt_translate_done_at),
+        _elapsed_ms(trace.tts_started_at, trace.tts_ready_at),
+        _elapsed_ms(trace.asr_started_at, trace.tts_ready_at),
+        trace.mt_scene_cache_hit,
+        trace.asr_partial_count,
+    )
+
+
+def _observe_asr_partial(trace: _PipelineTrace, text: str) -> None:
+    if not text:
+        return
+    now = _now()
+    trace.asr_last_partial_at = now
+    trace.asr_partial_count += 1
+    if trace.asr_first_partial_at <= 0.0:
+        trace.asr_first_partial_at = now
+    asr_log.info("partial | text=%s", text)
 
 
 class _ASRMetrics:
@@ -290,7 +395,9 @@ _mt_prompt_context = MTPromptContext()
 _mt_scene_cache = {
     "analysis": SceneAnalysis(),
     "turns_since_refresh": MT_SCENE_ANALYZER_REFRESH_TURNS,
+    "refresh_in_flight": False,
 }
+_mt_scene_cache_lock = threading.Lock()
 
 
 def _postprocess_asr_final(text: str) -> str:
@@ -304,8 +411,8 @@ def _postprocess_asr_final(text: str) -> str:
     return rewritten
 
 
-def _mt_context_prompt(text: str) -> str:
-    analysis = _analyze_mt_scene(text)
+def _mt_context_prompt(text: str, trace: _PipelineTrace) -> str:
+    analysis = _analyze_mt_scene(text, trace)
     prompt = _mt_prompt_context.build_translation_prompt(analysis.summary_block())
     if prompt:
         mt_context_log.info(
@@ -362,26 +469,10 @@ def _call_deepseek_chat(
     return content
 
 
-def _analyze_mt_scene(text: str) -> SceneAnalysis:
-    if not MT_SCENE_ANALYZER_ENABLED:
-        return SceneAnalysis()
-
-    cached_analysis = _mt_scene_cache["analysis"]
-    turns_since_refresh = int(_mt_scene_cache["turns_since_refresh"])
-    if turns_since_refresh < MT_SCENE_ANALYZER_REFRESH_TURNS:
-        _mt_scene_cache["turns_since_refresh"] = turns_since_refresh + 1
-        mt_context_log.info(
-            "scene_cache_hit | turn=%s/%s | scene=%s | entity_focus=%s",
-            turns_since_refresh + 1,
-            MT_SCENE_ANALYZER_REFRESH_TURNS,
-            cached_analysis.scene,
-            cached_analysis.entity_focus,
-        )
-        return cached_analysis
-
+def _build_scene_analyzer_messages(text: str) -> list[dict[str, str]]:
     recent_context = _mt_prompt_context.recent_context_block()
     context_block = f"\n\n{recent_context}" if recent_context else ""
-    messages = [
+    return [
         {
             "role": "system",
             "content": (
@@ -407,7 +498,10 @@ def _analyze_mt_scene(text: str) -> SceneAnalysis:
         },
     ]
 
+
+def _refresh_mt_scene_async(text: str) -> None:
     try:
+        messages = _build_scene_analyzer_messages(text)
         response_text = _call_deepseek_chat(
             messages=messages,
             model=MT_SCENE_ANALYZER_MODEL,
@@ -423,24 +517,81 @@ def _analyze_mt_scene(text: str) -> SceneAnalysis:
             analysis.register,
             analysis.confidence,
         )
-        previous = _mt_scene_cache["analysis"]
-        if analysis.cache_key() == previous.cache_key():
-            mt_context_log.info("scene_cache_refresh | changed=False")
-        else:
-            mt_context_log.info(
-                "scene_cache_refresh | changed=True | old_scene=%s | new_scene=%s",
-                previous.scene,
-                analysis.scene,
-            )
-            _mt_scene_cache["analysis"] = analysis
-        _mt_scene_cache["turns_since_refresh"] = 1
-        return analysis
+        with _mt_scene_cache_lock:
+            previous = _mt_scene_cache["analysis"]
+            if analysis.cache_key() == previous.cache_key():
+                mt_context_log.info("scene_cache_refresh | changed=False")
+            else:
+                mt_context_log.info(
+                    "scene_cache_refresh | changed=True | old_scene=%s | new_scene=%s",
+                    previous.scene,
+                    analysis.scene,
+                )
+                _mt_scene_cache["analysis"] = analysis
+            _mt_scene_cache["turns_since_refresh"] = 0
     except requests.exceptions.Timeout:
-        mt_context_log.warning("scene analyzer timed out; falling back to default analysis")
-        return SceneAnalysis()
+        mt_context_log.warning("scene analyzer timed out; keeping previous cached analysis")
     except Exception as exc:
         mt_context_log.warning("scene analyzer failed: %s", exc)
+    finally:
+        with _mt_scene_cache_lock:
+            _mt_scene_cache["refresh_in_flight"] = False
+
+
+def _start_mt_scene_refresh(text: str) -> None:
+    thread = threading.Thread(
+        target=_refresh_mt_scene_async,
+        args=(text,),
+        daemon=True,
+        name="mt-scene-refresh",
+    )
+    thread.start()
+
+
+def _analyze_mt_scene(text: str, trace: _PipelineTrace) -> SceneAnalysis:
+    if not MT_SCENE_ANALYZER_ENABLED:
         return SceneAnalysis()
+
+    should_refresh = False
+    with _mt_scene_cache_lock:
+        cached_analysis = _mt_scene_cache["analysis"]
+        turns_since_refresh = int(_mt_scene_cache["turns_since_refresh"])
+        refresh_in_flight = bool(_mt_scene_cache["refresh_in_flight"])
+
+        if turns_since_refresh < MT_SCENE_ANALYZER_REFRESH_TURNS:
+            _mt_scene_cache["turns_since_refresh"] = turns_since_refresh + 1
+            trace.mt_scene_cache_hit = True
+            mt_context_log.info(
+                "scene_cache_hit | turn=%s/%s | scene=%s | entity_focus=%s",
+                turns_since_refresh + 1,
+                MT_SCENE_ANALYZER_REFRESH_TURNS,
+                cached_analysis.scene,
+                cached_analysis.entity_focus,
+            )
+            return cached_analysis
+
+        trace.mt_scene_cache_hit = True
+        if refresh_in_flight:
+            mt_context_log.info(
+                "scene_cache_stale | reason=refresh_in_flight | scene=%s | entity_focus=%s",
+                cached_analysis.scene,
+                cached_analysis.entity_focus,
+            )
+        else:
+            _mt_scene_cache["refresh_in_flight"] = True
+            _mt_scene_cache["turns_since_refresh"] = MT_SCENE_ANALYZER_REFRESH_TURNS + 1
+            should_refresh = True
+            mt_context_log.info(
+                "scene_cache_refresh_scheduled | scene=%s | entity_focus=%s | refresh_turns=%s",
+                cached_analysis.scene,
+                cached_analysis.entity_focus,
+                MT_SCENE_ANALYZER_REFRESH_TURNS,
+            )
+
+    if should_refresh:
+        _start_mt_scene_refresh(text)
+
+    return cached_analysis
 
 
 @dataclass
@@ -625,6 +776,14 @@ class _SpeechFrontEnd:
 
 class LocalStreamingASR:
     def __init__(self):
+        try:
+            import sherpa_onnx
+        except ImportError as exc:
+            raise ImportError(
+                "Local ASR fallback requires sherpa_onnx. "
+                "Install local ASR dependencies or switch ASR_MODE=api_only."
+            ) from exc
+
         tokens_path = os.path.join(MODEL_PATH, "tokens.txt")
         encoder_path = os.path.join(MODEL_PATH, "encoder-epoch-99-avg-1.int8.onnx")
         decoder_path = os.path.join(MODEL_PATH, "decoder-epoch-99-avg-1.onnx")
@@ -658,16 +817,27 @@ class LocalStreamingASR:
         self.frontend = _SpeechFrontEnd()
 
         self.last_text = ""
+        self.last_partial_text = ""
+        self._active_trace: _PipelineTrace | None = None
 
     def _reset(self):
         self.stream = self.recognizer.create_stream()
         self.last_text = ""
+        self.last_partial_text = ""
+        self._active_trace = None
 
-    def process_audio(self, audio: np.ndarray) -> str:
+    def process_audio(self, audio: np.ndarray) -> _ASRTextEvent | None:
         decision = self.frontend.process_audio(audio)
         _asr_metrics.observe_frontend(decision)
 
+        if decision.speech_started and self._active_trace is None:
+            self._active_trace = _new_trace()
+            self._active_trace.asr_started_at = _now()
+
         for chunk in decision.feed_chunks:
+            if self._active_trace is None:
+                self._active_trace = _new_trace()
+                self._active_trace.asr_started_at = _now()
             self.stream.accept_waveform(SAMPLE_RATE, chunk)
             while self.recognizer.is_ready(self.stream):
                 self.recognizer.decode_stream(self.stream)
@@ -676,27 +846,37 @@ class LocalStreamingASR:
             current = self.recognizer.get_result(self.stream).strip()
             if current and current != self.last_text:
                 self.last_text = current
+            if current and current != self.last_partial_text and self._active_trace is not None:
+                self.last_partial_text = current
+                _observe_asr_partial(self._active_trace, current)
 
         if decision.should_finalize:
+            if self._active_trace is not None and self._active_trace.asr_speech_end_at <= 0.0:
+                self._active_trace.asr_speech_end_at = _now()
             final = self.recognizer.get_result(self.stream).strip() or self.last_text
+            trace = self._active_trace or _new_trace()
+            trace.asr_final_at = _now()
             self._reset()
             if decision.should_reset:
-                return ""
+                return None
             if final:
                 final = _postprocess_asr_final(final)
                 _asr_metrics.observe_final(final)
                 asr_log.info("final | text=%s", final)
-                return final
+                return _ASRTextEvent(text=final, trace=trace)
 
-        return ""
+        return None
 
     def close(self) -> None:
         return None
 
 
 class _QwenASRCallback:
-    def __init__(self, final_queue: queue.Queue[str]):
+    def __init__(self, final_queue: queue.Queue[str], partial_queue: queue.Queue[str]):
         self.final_queue = final_queue
+        self.partial_queue = partial_queue
+        self._partial_debug_logged = False
+        self._event_debug_types_logged: set[str] = set()
 
     def on_open(self):
         return None
@@ -707,6 +887,25 @@ class _QwenASRCallback:
     def on_event(self, response):
         try:
             event_type = response.get("type", "")
+            if (
+                event_type
+                and event_type not in self._event_debug_types_logged
+                and (
+                    "transcript" in event_type
+                    or "transcription" in event_type
+                    or "audio" in event_type
+                    or "conversation.item" in event_type
+                )
+            ):
+                self._event_debug_types_logged.add(event_type)
+                asr_log.info("qwen_event_debug | type=%s | payload=%s", event_type, response)
+            if event_type == "response.audio_transcript.delta":
+                if not self._partial_debug_logged:
+                    self._partial_debug_logged = True
+                    asr_log.info("partial_debug | payload=%s", response)
+                partial = (response.get("delta") or response.get("transcript") or "").strip()
+                if partial:
+                    self.partial_queue.put(partial)
             if event_type == "conversation.item.input_audio_transcription.completed":
                 transcript = response.get("transcript", "").strip()
                 if transcript:
@@ -732,9 +931,14 @@ class QwenStreamingASR:
         self._OmniRealtimeConversation = OmniRealtimeConversation
         self._TranscriptionParams = TranscriptionParams
         self._final_queue: queue.Queue[str] = queue.Queue()
-        self._callback = _QwenASRCallback(self._final_queue)
+        self._partial_queue: queue.Queue[str] = queue.Queue()
+        self._callback = _QwenASRCallback(self._final_queue, self._partial_queue)
         self.frontend = _SpeechFrontEnd()
         self._conversation = None
+        self._active_trace: _PipelineTrace | None = None
+        self._pending_traces: deque[_PipelineTrace] = deque()
+        self._last_trace_candidate: _PipelineTrace | None = None
+        self._last_partial_text = ""
         self._connect_conversation()
 
         asr_log.info(
@@ -772,10 +976,20 @@ class QwenStreamingASR:
             pass
         self._connect_conversation()
 
-    def process_audio(self, audio: np.ndarray) -> str:
+    def process_audio(self, audio: np.ndarray) -> _ASRTextEvent | None:
         decision = self.frontend.process_audio(audio)
         _asr_metrics.observe_frontend(decision)
+
+        if decision.speech_started and self._active_trace is None:
+            self._active_trace = _new_trace()
+            self._active_trace.asr_started_at = _now()
+            self._last_trace_candidate = self._active_trace
+
         for chunk in decision.feed_chunks:
+            if self._active_trace is None:
+                self._active_trace = _new_trace()
+                self._active_trace.asr_started_at = _now()
+            self._last_trace_candidate = self._active_trace
             pcm = np.clip(chunk, -1.0, 1.0)
             pcm16 = (pcm * 32767).astype(np.int16)
             audio_b64 = base64.b64encode(pcm16.tobytes()).decode("ascii")
@@ -787,14 +1001,44 @@ class QwenStreamingASR:
                     raise
                 self._reconnect_conversation()
                 self._conversation.append_audio(audio_b64)
+        if decision.should_finalize and self._active_trace is not None:
+            if self._active_trace.asr_speech_end_at <= 0.0:
+                self._active_trace.asr_speech_end_at = _now()
+            if not decision.should_reset:
+                self._pending_traces.append(self._active_trace)
+                self._last_trace_candidate = self._active_trace
+            self._active_trace = None
+        current_trace = self._active_trace or (self._pending_traces[-1] if self._pending_traces else self._last_trace_candidate)
+        while True:
+            try:
+                partial = self._partial_queue.get_nowait()
+            except queue.Empty:
+                break
+            if partial and partial != self._last_partial_text and current_trace is not None:
+                self._last_partial_text = partial
+                _observe_asr_partial(current_trace, partial)
         try:
             final = self._final_queue.get_nowait()
+            if self._pending_traces:
+                trace = self._pending_traces.popleft()
+            elif self._active_trace is not None:
+                trace = self._active_trace
+            elif self._last_trace_candidate is not None:
+                trace = self._last_trace_candidate
+            else:
+                trace = _new_trace()
+                trace.asr_started_at = _now()
+            if trace.asr_speech_end_at <= 0.0:
+                trace.asr_speech_end_at = _now()
+            trace.asr_final_at = _now()
+            self._last_trace_candidate = trace
+            self._last_partial_text = ""
             final = _postprocess_asr_final(final)
             _asr_metrics.observe_final(final)
             asr_log.info("final | text=%s", final)
-            return final
+            return _ASRTextEvent(text=final, trace=trace)
         except queue.Empty:
-            return ""
+            return None
 
     def close(self) -> None:
         try:
@@ -811,17 +1055,28 @@ def build_asr_backend():
     if USE_QWEN_ASR_API:
         try:
             asr = QwenStreamingASR()
-            asr_log.info("route | primary=qwen_api | fallback=zipformer")
+            asr_log.info(
+                "route | mode=%s | primary=qwen_api | fallback=%s",
+                ASR_MODE,
+                "zipformer" if not API_ONLY_ASR else "none",
+            )
             return asr
         except Exception as exc:
+            if API_ONLY_ASR:
+                raise RuntimeError(
+                    f"Qwen ASR unavailable and API-only mode is enabled: {exc}"
+                ) from exc
             asr_log.warning("Qwen ASR unavailable, fallback to local zipformer: %s", exc)
+    elif API_ONLY_ASR:
+        raise RuntimeError("ASR_MODE=api_only requires USE_QWEN_ASR_API=true")
     asr = LocalStreamingASR()
-    asr_log.info("route | primary=zipformer")
+    asr_log.info("route | mode=%s | primary=zipformer", ASR_MODE)
     return asr
 
 
-def _translate_local(text: str) -> str | None:
+def _translate_local(text: str, trace: _PipelineTrace) -> str | None:
     try:
+        trace.mt_translate_started_at = _now()
         mt_log.info(
             "request | url=%s | source=%s | target=%s | timeout=%ss",
             MT_URL,
@@ -840,20 +1095,23 @@ def _translate_local(text: str) -> str | None:
         )
         resp.raise_for_status()
         result = resp.json().get("translated_text", "").strip()
+        trace.mt_translate_done_at = _now()
         if result:
             _mt_remember_turn(text, result)
             mt_log.info("result | text=%s", result)
         return result or None
     except requests.exceptions.Timeout:
+        trace.mt_translate_done_at = _now()
         mt_log.warning("Timed out - skipping utterance.")
         return None
     except Exception as exc:
+        trace.mt_translate_done_at = _now()
         mt_log.error("Error: %s", exc)
         return None
 
 
-def _translate_deepseek(text: str) -> str | None:
-    context_prompt = _mt_context_prompt(text)
+def _translate_deepseek(text: str, trace: _PipelineTrace) -> str | None:
+    context_prompt = _mt_context_prompt(text, trace)
     prompt_suffix = ""
     if context_prompt:
         prompt_suffix = "\n\n" + context_prompt
@@ -884,33 +1142,37 @@ def _translate_deepseek(text: str) -> str | None:
             },
         ]
 
+        trace.mt_translate_started_at = _now()
         result = _call_deepseek_chat(
             messages=messages,
             model=DEEPSEEK_MODEL,
             timeout_sec=MT_TIMEOUT_SEC,
             stage="translator",
         )
+        trace.mt_translate_done_at = _now()
         if result:
             _mt_remember_turn(text, result)
             mt_log.info("result | text=%s", result)
         return result or None
     except requests.exceptions.Timeout:
+        trace.mt_translate_done_at = _now()
         mt_log.warning("Timed out - skipping utterance.")
         return None
     except Exception as exc:
+        trace.mt_translate_done_at = _now()
         mt_log.error("Exception: %s", exc)
         return None
 
 
-def translate(text: str) -> str | None:
+def translate(text: str, trace: _PipelineTrace) -> str | None:
     if USE_LOCAL_MT:
-        return _translate_local(text)
-    return _translate_deepseek(text)
+        return _translate_local(text, trace)
+    return _translate_deepseek(text, trace)
 
 
 _audio_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=AUDIO_QUEUE_MAX_CHUNKS)
-_asr_text_q: queue.Queue[str] = queue.Queue(maxsize=ASR_RESULT_QUEUE_MAX)
-_tts_q: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=TTS_QUEUE_MAX)
+_asr_text_q: queue.Queue[_ASRTextEvent] = queue.Queue(maxsize=ASR_RESULT_QUEUE_MAX)
+_tts_q: queue.Queue[_TTSEvent] = queue.Queue(maxsize=TTS_QUEUE_MAX)
 _audio_overflow_count = 0
 _audio_drop_count = 0
 _queue_drop_counts = {
@@ -969,9 +1231,16 @@ def _audio_callback(indata, frames, time_info, status):
             )
 
 
-def _run_tts(text: str, lang: str) -> None:
+def _run_tts(event: _TTSEvent) -> None:
     try:
-        tts_speak(text, lang=lang)
+        event.trace.tts_started_at = _now()
+        result = tts_speak(event.text, lang=event.lang)
+        event.trace.tts_done_at = _now()
+        if result is not None:
+            event.trace.tts_ready_at = event.trace.tts_started_at + (result.provider_ready_ms / 1000.0)
+        else:
+            event.trace.tts_ready_at = event.trace.tts_done_at
+        _log_trace_latency(event.trace)
     except Exception as exc:
         get_logger("TTS").error("thread crashed: %s", exc)
 
@@ -985,9 +1254,9 @@ def _asr_worker(asr, stop_event: threading.Event) -> None:
 
         try:
             try:
-                final = asr.process_audio(chunk)
-                if final:
-                    _put_latest(_asr_text_q, final, "asr_text")
+                final_event = asr.process_audio(chunk)
+                if final_event:
+                    _put_latest(_asr_text_q, final_event, "asr_text")
             except Exception as exc:
                 _asr_metrics.observe_asr_error()
                 asr_log.warning("worker recoverable error: %s", exc)
@@ -999,14 +1268,14 @@ def _asr_worker(asr, stop_event: threading.Event) -> None:
 def _mt_worker(stop_event: threading.Event) -> None:
     while not stop_event.is_set():
         try:
-            text = _asr_text_q.get(timeout=0.2)
+            event = _asr_text_q.get(timeout=0.2)
         except queue.Empty:
             continue
 
         try:
-            translation = translate(text)
+            translation = translate(event.text, event.trace)
             if translation:
-                _put_latest(_tts_q, (translation, MT_TARGET_LANG), "tts")
+                _put_latest(_tts_q, _TTSEvent(text=translation, lang=MT_TARGET_LANG, trace=event.trace), "tts")
         finally:
             _asr_text_q.task_done()
 
@@ -1014,12 +1283,12 @@ def _mt_worker(stop_event: threading.Event) -> None:
 def _tts_worker(stop_event: threading.Event) -> None:
     while not stop_event.is_set():
         try:
-            text, lang = _tts_q.get(timeout=0.2)
+            event = _tts_q.get(timeout=0.2)
         except queue.Empty:
             continue
 
         try:
-            _run_tts(text, lang)
+            _run_tts(event)
         finally:
             _tts_q.task_done()
 

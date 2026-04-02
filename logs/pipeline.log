@@ -113,3 +113,181 @@
 00:50:28 [pipeline.MT] INFO    result | text=Uh-huh.
 00:50:28 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
 00:56:07 [pipeline.PIPELINE] INFO    Pipeline stopped.
+10:40:50 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+10:40:50 [pipeline.MT.CONTEXT] INFO    scene_analyzer | enabled=True | model=deepseek-chat | timeout=8s
+10:40:52 [pipeline.PIPELINE] INFO    System ready - start speaking!
+10:43:36 [pipeline.ASR] INFO    final | text=医疗补贴，嗯。
+10:43:36 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=scene_analyzer | model=deepseek-chat | timeout=8s
+10:43:39 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=scene_analyzer | chars=247
+10:43:39 [pipeline.MT.CONTEXT] INFO    scene_result | scene=general | utterance_type=fragment | entity_focus=concept | register=spoken | confidence=high
+10:43:39 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+10:43:41 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=21
+10:43:41 [pipeline.MT] INFO    result | text=Medical subsidy, hmm.
+10:43:42 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+10:47:00 [pipeline.PIPELINE] INFO    Pipeline stopped.
+15:01:53 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+15:01:53 [pipeline.MT.CONTEXT] INFO    scene_analyzer | enabled=True | model=deepseek-chat | timeout=8s
+15:01:54 [pipeline.PIPELINE] INFO    System ready - start speaking!
+15:02:03 [pipeline.ASR] INFO    final | text=咱们膝盖是第几组呀什么时候？
+15:02:03 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=scene_analyzer | model=deepseek-chat | timeout=8s
+15:02:07 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=scene_analyzer | chars=300
+15:02:07 [pipeline.MT.CONTEXT] INFO    scene_result | scene=campus | utterance_type=question | entity_focus=course | register=spoken | confidence=medium
+15:02:07 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+15:02:09 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=36
+15:02:09 [pipeline.MT] INFO    result | text=Which group is our knee in and when?
+15:02:11 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+15:02:14 [pipeline.LATENCY] INFO    trace | id=2 | asr_latency_ms=0.0 | mt_scene_analyzer_latency_ms=4219.2 | mt_translator_latency_ms=1809.8 | tts_latency_ms=1535.9 | end_to_end_latency_ms=0.0 | scene_cache_hit=False
+15:11:20 [pipeline.PIPELINE] INFO    Pipeline stopped.
+15:12:25 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+15:12:25 [pipeline.MT.CONTEXT] INFO    scene_analyzer | enabled=True | model=deepseek-chat | timeout=8s
+15:12:47 [pipeline.ASR] WARNING Qwen ASR unavailable, fallback to local zipformer: Remote end closed connection without response
+15:13:09 [pipeline.PIPELINE] INFO    System ready - start speaking!
+15:14:17 [pipeline.ASR] INFO    final | text=不是他今天上课讲课
+15:14:17 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=scene_analyzer | model=deepseek-chat | timeout=8s
+15:14:21 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=scene_analyzer | chars=230
+15:14:21 [pipeline.MT.CONTEXT] INFO    scene_result | scene=campus | utterance_type=fragment | entity_focus=person | register=spoken | confidence=high
+15:14:21 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+15:14:22 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=34
+15:14:22 [pipeline.MT] INFO    result | text=He's not teaching the class today.
+15:14:24 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+15:14:27 [pipeline.LATENCY] INFO    trace | id=1 | asr_latency_ms=3423.7 | mt_scene_analyzer_latency_ms=3524.7 | mt_translator_latency_ms=1529.2 | tts_latency_ms=1668.9 | end_to_end_latency_ms=10149.7 | scene_cache_hit=False
+15:22:17 [pipeline.PIPELINE] INFO    Pipeline stopped.
+15:30:55 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+15:30:55 [pipeline.MT.CONTEXT] INFO    scene_analyzer | enabled=True | model=deepseek-chat | timeout=8s
+15:30:56 [pipeline.PIPELINE] INFO    System ready - start speaking!
+15:31:19 [pipeline.ASR] INFO    final | text=今天是愚人节，我操，才才意识到。
+15:31:19 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=scene_analyzer | model=deepseek-chat | timeout=8s
+15:31:19 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+15:31:21 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=49
+15:31:21 [pipeline.MT] INFO    result | text=Today is April Fool's Day, damn, I just realized.
+15:31:23 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+15:31:23 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=scene_analyzer | chars=240
+15:31:23 [pipeline.MT.CONTEXT] INFO    scene_result | scene=daily_chat | utterance_type=exclamation | entity_focus=none | register=spoken | confidence=high
+15:31:29 [pipeline.LATENCY] INFO    trace | id=1 | asr_latency_ms=12540.8 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=1990.6 | tts_latency_ms=1861.0 | end_to_end_latency_ms=16394.9 | scene_cache_hit=True
+15:32:17 [pipeline.ASR] INFO    final | text=好像听魏鸿说，南大跟东南的那个啥玩意儿换。
+15:32:17 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+15:32:19 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=111
+15:32:19 [pipeline.MT] INFO    result | text=Seems like I heard Wei Hong say something about Nanjing University and Southeast University swapping something.
+15:32:21 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+15:32:29 [pipeline.LATENCY] INFO    trace | id=2 | asr_latency_ms=60109.4 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=1879.3 | tts_latency_ms=2495.4 | end_to_end_latency_ms=64486.1 | scene_cache_hit=True
+15:40:03 [pipeline.PIPELINE] INFO    Pipeline stopped.
+15:55:43 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+15:55:43 [pipeline.MT.CONTEXT] INFO    scene_analyzer | enabled=True | model=deepseek-chat | timeout=8s
+15:55:44 [pipeline.PIPELINE] INFO    System ready - start speaking!
+15:57:16 [pipeline.ASR] INFO    final | text=没去训练呢。
+15:57:16 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=scene_analyzer | model=deepseek-chat | timeout=8s
+15:57:16 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+15:57:18 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=22
+15:57:18 [pipeline.MT] INFO    result | text=Didn't go to training.
+15:57:19 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+15:57:20 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=scene_analyzer | chars=212
+15:57:20 [pipeline.MT.CONTEXT] INFO    scene_result | scene=daily_chat | utterance_type=statement | entity_focus=none | register=spoken | confidence=high
+15:57:21 [pipeline.LATENCY] INFO    trace | id=1 | asr_latency_ms=2591.2 | asr_first_partial_ms=0.0 | asr_final_tail_ms=0.0 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=1885.6 | tts_latency_ms=959.7 | end_to_end_latency_ms=5438.5 | scene_cache_hit=True | partials=0
+15:58:44 [pipeline.PIPELINE] INFO    Pipeline stopped.
+16:03:35 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+16:03:35 [pipeline.MT.CONTEXT] INFO    scene_analyzer | enabled=True | model=deepseek-chat | timeout=8s
+16:03:36 [pipeline.PIPELINE] INFO    System ready - start speaking!
+16:04:07 [pipeline.ASR] INFO    final | text=你上问球了吗？对呀。
+16:04:07 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=scene_analyzer | model=deepseek-chat | timeout=8s
+16:04:07 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+16:04:09 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=39
+16:04:09 [pipeline.MT] INFO    result | text=Did you ask about the ball? Yes, I did.
+16:04:11 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+16:04:12 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=scene_analyzer | chars=287
+16:04:12 [pipeline.MT.CONTEXT] INFO    scene_result | scene=daily_chat | utterance_type=fragment | entity_focus=none | register=spoken | confidence=medium
+16:04:15 [pipeline.LATENCY] INFO    trace | id=1 | asr_latency_ms=2278.1 | asr_first_partial_ms=0.0 | asr_final_tail_ms=0.0 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=1894.6 | tts_latency_ms=1518.0 | end_to_end_latency_ms=5693.6 | scene_cache_hit=True | partials=0
+16:06:45 [pipeline.PIPELINE] INFO    Pipeline stopped.
+21:16:40 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+21:16:40 [pipeline.MT.CONTEXT] INFO    scene_analyzer | enabled=True | model=deepseek-chat | timeout=8s
+21:16:42 [pipeline.PIPELINE] INFO    System ready - start speaking!
+21:16:46 [pipeline.ASR] INFO    final | text=今天是愚人节。
+21:16:46 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=scene_analyzer | model=deepseek-chat | timeout=8s
+21:16:46 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+21:16:48 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=26
+21:16:48 [pipeline.MT] INFO    result | text=Today is April Fool's Day.
+21:16:49 [pipeline.ASR] INFO    final | text=咋地啦？
+21:16:49 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+21:16:49 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+21:16:50 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=scene_analyzer | chars=215
+21:16:50 [pipeline.MT.CONTEXT] INFO    scene_result | scene=daily_chat | utterance_type=statement | entity_focus=none | register=spoken | confidence=high
+21:16:50 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=10
+21:16:50 [pipeline.MT] INFO    result | text=What's up?
+21:16:53 [pipeline.ASR] INFO    final | text=后面。
+21:16:53 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+21:16:53 [pipeline.LATENCY] INFO    trace | id=1 | asr_latency_ms=1730.5 | asr_first_partial_ms=0.0 | asr_final_tail_ms=2272.1 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=1703.6 | tts_latency_ms=1262.4 | end_to_end_latency_ms=4730.1 | scene_cache_hit=True | partials=0
+21:16:54 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+21:16:55 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=7
+21:16:55 [pipeline.MT] INFO    result | text=Behind.
+21:16:56 [pipeline.LATENCY] INFO    trace | id=1 | asr_latency_ms=1730.5 | asr_first_partial_ms=0.0 | asr_final_tail_ms=2272.1 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=1703.6 | tts_latency_ms=777.5 | end_to_end_latency_ms=9387.1 | scene_cache_hit=True | partials=0
+21:16:56 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+21:16:59 [pipeline.LATENCY] INFO    trace | id=2 | asr_latency_ms=1537.5 | asr_first_partial_ms=0.0 | asr_final_tail_ms=4095.9 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=1587.4 | tts_latency_ms=829.8 | end_to_end_latency_ms=9204.3 | scene_cache_hit=True | partials=0
+21:17:02 [pipeline.ASR] INFO    final | text=你好。
+21:17:02 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+21:17:04 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=6
+21:17:04 [pipeline.MT] INFO    result | text=Hello.
+21:17:05 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+21:17:07 [pipeline.LATENCY] INFO    trace | id=3 | asr_latency_ms=1806.7 | asr_first_partial_ms=0.0 | asr_final_tail_ms=9183.9 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=1562.2 | tts_latency_ms=929.2 | end_to_end_latency_ms=13485.6 | scene_cache_hit=True | partials=0
+21:17:10 [pipeline.ASR] INFO    final | text=李白乘舟将欲行。
+21:17:10 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+21:17:12 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=40
+21:17:12 [pipeline.MT] INFO    result | text=Li Bai boards a boat, about to set sail.
+21:17:13 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+21:17:18 [pipeline.LATENCY] INFO    trace | id=4 | asr_latency_ms=1342.4 | asr_first_partial_ms=0.0 | asr_final_tail_ms=7023.7 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=2086.6 | tts_latency_ms=1613.8 | end_to_end_latency_ms=12083.7 | scene_cache_hit=True | partials=0
+21:17:20 [pipeline.ASR] INFO    final | text=这女音色吗？
+21:17:20 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+21:17:21 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=23
+21:17:21 [pipeline.MT] INFO    result | text=Is this a female voice?
+21:17:23 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+21:17:26 [pipeline.LATENCY] INFO    trace | id=5 | asr_latency_ms=2273.1 | asr_first_partial_ms=0.0 | asr_final_tail_ms=10001.6 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=1706.9 | tts_latency_ms=1153.0 | end_to_end_latency_ms=15137.5 | scene_cache_hit=True | partials=0
+21:18:21 [pipeline.ASR] INFO    final | text=拍手应该会。
+21:18:21 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+21:18:22 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=28
+21:18:22 [pipeline.MT] INFO    result | text=Clapping should be possible.
+21:18:23 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+21:18:26 [pipeline.LATENCY] INFO    trace | id=6 | asr_latency_ms=1597.5 | asr_first_partial_ms=0.0 | asr_final_tail_ms=60702.6 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=1529.5 | tts_latency_ms=1090.3 | end_to_end_latency_ms=64922.3 | scene_cache_hit=True | partials=0
+21:19:52 [pipeline.PIPELINE] INFO    Pipeline stopped.
+21:21:10 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+21:21:10 [pipeline.MT.CONTEXT] INFO    scene_analyzer | enabled=True | model=deepseek-chat | timeout=8s
+21:21:12 [pipeline.PIPELINE] INFO    System ready - start speaking!
+21:21:16 [pipeline.ASR] INFO    final | text=Hello, how are you?
+21:21:16 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=scene_analyzer | model=deepseek-chat | timeout=8s
+21:21:16 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+21:21:18 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=9
+21:21:18 [pipeline.MT] INFO    result | text=你好，最近怎么样？
+21:21:19 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+21:21:20 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=scene_analyzer | chars=219
+21:21:20 [pipeline.MT.CONTEXT] INFO    scene_result | scene=daily_chat | utterance_type=question | entity_focus=none | register=spoken | confidence=high
+21:21:22 [pipeline.LATENCY] INFO    trace | id=1 | asr_latency_ms=1637.7 | asr_first_partial_ms=0.0 | asr_final_tail_ms=0.0 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=1791.5 | tts_latency_ms=1098.8 | end_to_end_latency_ms=4533.9 | scene_cache_hit=True | partials=0
+21:21:24 [pipeline.ASR] INFO    final | text=Hi, Tingxiang.
+21:21:24 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+21:21:26 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=5
+21:21:26 [pipeline.MT] INFO    result | text=嗨，听香。
+21:21:27 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+21:21:30 [pipeline.LATENCY] INFO    trace | id=1 | asr_latency_ms=1637.7 | asr_first_partial_ms=0.0 | asr_final_tail_ms=8010.4 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=1871.5 | tts_latency_ms=1053.5 | end_to_end_latency_ms=12576.7 | scene_cache_hit=True | partials=0
+21:36:03 [pipeline.Audio] WARNING input overflow | overflow_count=1
+19:16:14 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+19:16:14 [pipeline.MT.CONTEXT] INFO    scene_analyzer | enabled=True | model=deepseek-chat | timeout=8s
+19:16:15 [pipeline.PIPELINE] INFO    System ready - start speaking!
+19:16:21 [pipeline.ASR] INFO    final | text=But later, I found this.
+19:16:21 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=scene_analyzer | model=deepseek-chat | timeout=8s
+19:16:21 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+19:16:22 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=11
+19:16:22 [pipeline.MT] INFO    result | text=但后来，我发现了这个。
+19:16:24 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+19:16:25 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=scene_analyzer | chars=197
+19:16:25 [pipeline.MT.CONTEXT] INFO    scene_result | scene=general | utterance_type=fragment | entity_focus=none | register=spoken | confidence=medium
+19:16:27 [pipeline.LATENCY] INFO    trace | id=1 | asr_latency_ms=2746.1 | asr_first_partial_ms=0.0 | asr_final_tail_ms=0.0 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=1516.9 | tts_latency_ms=1278.3 | end_to_end_latency_ms=5545.2 | scene_cache_hit=True | partials=0
+19:16:41 [pipeline.PIPELINE] INFO    Pipeline stopped.
+19:16:47 [pipeline.PIPELINE] INFO    ASR -> MT -> TTS pipeline starting
+19:16:47 [pipeline.MT.CONTEXT] INFO    scene_analyzer | enabled=True | model=deepseek-chat | timeout=8s
+19:16:48 [pipeline.PIPELINE] INFO    System ready - start speaking!
+19:16:54 [pipeline.ASR] INFO    final | text=他们就讲起话来，就是呃，斯文粉。
+19:16:54 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=scene_analyzer | model=deepseek-chat | timeout=8s
+19:16:54 [pipeline.MT.CONTEXT] INFO    deepseek_call | stage=translator | model=deepseek-chat | timeout=8s
+19:16:57 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=translator | chars=49
+19:16:57 [pipeline.MT] INFO    result | text=They started talking, just, uh, the refined fans.
+19:16:58 [pipeline.MT.CONTEXT] INFO    deepseek_done | stage=scene_analyzer | chars=250
+19:16:58 [pipeline.MT.CONTEXT] INFO    scene_result | scene=daily_chat | utterance_type=statement | entity_focus=none | register=spoken | confidence=medium
+19:16:59 [pipeline.TTS] INFO    TTS provider | provider=qwen_api | model=qwen3-tts-vc-2026-01-22
+19:17:04 [pipeline.LATENCY] INFO    trace | id=1 | asr_latency_ms=3495.9 | asr_first_partial_ms=0.0 | asr_final_tail_ms=0.0 | mt_scene_analyzer_latency_ms=0.0 | mt_translator_latency_ms=2502.1 | tts_latency_ms=1961.1 | end_to_end_latency_ms=7969.5 | scene_cache_hit=True | partials=0
+19:17:34 [pipeline.PIPELINE] INFO    Pipeline stopped.
