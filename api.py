@@ -127,9 +127,11 @@ def _start_pipeline_process() -> dict:
 
         child_env = os.environ.copy()
         child_env["PYTHONUNBUFFERED"] = "1"
+        child_env["PYTHONUTF8"] = "1"
+        child_env["PYTHONIOENCODING"] = "utf-8"
 
         proc = subprocess.Popen(
-            [sys.executable, "-u", str(ORCHESTRATOR_PATH)],
+            [sys.executable, "-X", "utf8", "-u", str(ORCHESTRATOR_PATH)],
             cwd=str(BASE_DIR),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
