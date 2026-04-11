@@ -17,12 +17,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 
-load_dotenv()
+from app_paths import bundle_path, is_frozen, runtime_dir, runtime_path
 
-BASE_DIR = Path(__file__).resolve().parent
-WEB_DIR = BASE_DIR / "web"
-ORCHESTRATOR_PATH = BASE_DIR / "orchestrator.py"
-ENV_PATH = BASE_DIR / ".env"
+load_dotenv(runtime_path(".env"))
+
+BASE_DIR = runtime_dir()
+WEB_DIR = bundle_path("web")
+ORCHESTRATOR_PATH = bundle_path("orchestrator.py")
+ENV_PATH = runtime_path(".env")
 MAX_PIPELINE_LOG_LINES = 300
 
 sys.path.append(str(BASE_DIR))
@@ -111,6 +113,12 @@ def _read_pipeline_output(proc: subprocess.Popen) -> None:
                 _pipeline_process = None
 
 
+def _build_orchestrator_command() -> list[str]:
+    if is_frozen():
+        return [sys.executable, "--run-orchestrator"]
+    return [sys.executable, "-X", "utf8", "-u", str(ORCHESTRATOR_PATH)]
+
+
 def _start_pipeline_process() -> dict:
     global _pipeline_process, _pipeline_reader_thread
 
@@ -129,9 +137,10 @@ def _start_pipeline_process() -> dict:
         child_env["PYTHONUNBUFFERED"] = "1"
         child_env["PYTHONUTF8"] = "1"
         child_env["PYTHONIOENCODING"] = "utf-8"
+        child_env["APP_RUNTIME_DIR"] = str(BASE_DIR)
 
         proc = subprocess.Popen(
-            [sys.executable, "-X", "utf8", "-u", str(ORCHESTRATOR_PATH)],
+            _build_orchestrator_command(),
             cwd=str(BASE_DIR),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -195,6 +204,13 @@ def _stop_pipeline_process() -> dict:
     }
 
 
+def stop_pipeline_process_for_shutdown() -> None:
+    try:
+        _stop_pipeline_process()
+    except Exception:
+        pass
+
+
 def _build_pipeline_payload() -> dict:
     pid = None
     if _pipeline_process is not None and _pipeline_process.poll() is None:
@@ -211,6 +227,7 @@ def _build_pipeline_payload() -> dict:
 async def lifespan(app: FastAPI):
     log.info("API server ready.")
     yield
+    stop_pipeline_process_for_shutdown()
     log.info("Shutting down.")
 
 

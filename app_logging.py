@@ -9,6 +9,7 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from app_paths import runtime_dir
 
 _CONFIGURED = False
 _HANDLER_TAG = "_pipeline_logging_handler"
@@ -16,6 +17,20 @@ _LOGGER_TAG = "_pipeline_named_logger"
 _APP_LOGGER_PREFIX = "pipeline"
 _CONSOLE_HANDLER: logging.Handler | None = None
 _FILE_HANDLER: logging.Handler | None = None
+
+
+def _configure_stdio_utf8() -> None:
+    # The packaged desktop app pipes child-process logs back into the dashboard.
+    # Force UTF-8 here so Chinese ASR text survives the round-trip unchanged.
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if stream is None or not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -178,7 +193,7 @@ class _MinimalConsoleFormatter(logging.Formatter):
 
 
 def default_log_path() -> Path:
-    base_dir = Path(__file__).resolve().parent
+    base_dir = runtime_dir()
     log_dir = Path(os.getenv("LOG_DIR", str(base_dir / "logs")))
     file_name = os.getenv("LOG_FILE_NAME", "pipeline.log").strip() or "pipeline.log"
     if _log_rotate_minutes() > 0:
@@ -272,6 +287,8 @@ def configure_logging() -> None:
     global _CONFIGURED, _CONSOLE_HANDLER, _FILE_HANDLER
     if _CONFIGURED:
         return
+
+    _configure_stdio_utf8()
 
     formatter = logging.Formatter(
         fmt="%(asctime)s [%(name)s] %(levelname)-7s %(message)s",

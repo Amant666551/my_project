@@ -161,6 +161,7 @@ class SpeakerMatcher:
         ).strip()
         self._registry: list[RegisteredSpeaker] = []
         self._sessions: list[SessionSpeaker] = []
+        self._registry_sessions: dict[str, SessionSpeaker] = {}
         self._speaker_counter = count(1)
         self._lock = threading.Lock()
         self._torchaudio = None
@@ -487,7 +488,33 @@ class SpeakerMatcher:
             matched_registry=matched_registry,
         )
         self._sessions.append(session)
+        if matched_registry is not None:
+            self._registry_sessions[matched_registry.label] = session
         return session
+
+    def _update_session(self, session: SessionSpeaker, embedding: np.ndarray) -> float:
+        score = self._cosine_similarity(embedding, session.centroid)
+        updated = (
+            (1.0 - self.session_update_alpha) * session.centroid
+            + (self.session_update_alpha * embedding)
+        )
+        norm = float(np.linalg.norm(updated))
+        if norm > 0.0:
+            session.centroid = (updated / norm).astype(np.float32)
+        session.turns += 1
+        return max(score, 0.0)
+
+    def _bind_registry_session(
+        self,
+        session: SessionSpeaker,
+        registry: RegisteredSpeaker | None,
+    ) -> bool:
+        if registry is None:
+            return False
+        previous = self._registry_sessions.get(registry.label)
+        session.matched_registry = registry
+        self._registry_sessions[registry.label] = session
+        return previous is None or previous.speaker_id != session.speaker_id
 
     def match_utterance(self, audio: np.ndarray | None) -> SpeakerDecision | None:
         if not self.enabled or audio is None:
@@ -516,9 +543,17 @@ class SpeakerMatcher:
             ):
                 registry_candidate = registry_speaker
 
+            bound_registry_session = None
+            if registry_candidate is not None:
+                bound_registry_session = self._registry_sessions.get(registry_candidate.label)
+
             session_speaker, session_score, second_session_score = self._best_session(embedding)
             force_new_session = False
-            if session_speaker is not None and registry_candidate is not None:
+            if (
+                session_speaker is not None
+                and registry_candidate is not None
+                and bound_registry_session is None
+            ):
                 bound_registry = session_speaker.matched_registry
                 if bound_registry is not None and bound_registry.label != registry_candidate.label:
                     bound_score = self._registry_similarity(embedding, bound_registry)
@@ -530,7 +565,12 @@ class SpeakerMatcher:
                 and second_session_score > 0.0
                 and (session_score - second_session_score) < self.session_margin_threshold
             )
-            if (
+            if bound_registry_session is not None:
+                session_speaker = bound_registry_session
+                session_score = self._update_session(session_speaker, embedding)
+                is_new_session = False
+                is_new_registry_match = self._bind_registry_session(session_speaker, registry_candidate)
+            elif (
                 session_speaker is None
                 or session_score < self.cluster_threshold
                 or force_new_session
@@ -541,23 +581,14 @@ class SpeakerMatcher:
                 is_new_session = True
                 is_new_registry_match = registry_candidate is not None
             else:
-                updated = (
-                    (1.0 - self.session_update_alpha) * session_speaker.centroid
-                    + (self.session_update_alpha * embedding)
-                )
-                norm = float(np.linalg.norm(updated))
-                if norm > 0.0:
-                    session_speaker.centroid = (updated / norm).astype(np.float32)
-                session_speaker.turns += 1
+                session_score = self._update_session(session_speaker, embedding)
                 is_new_session = False
                 is_new_registry_match = False
                 if registry_candidate is not None:
-                    if (
-                        session_speaker.matched_registry is None
-                        or session_speaker.matched_registry.label != registry_candidate.label
-                    ):
-                        session_speaker.matched_registry = registry_candidate
-                        is_new_registry_match = True
+                    is_new_registry_match = self._bind_registry_session(
+                        session_speaker,
+                        registry_candidate,
+                    )
 
             chosen_registry = session_speaker.matched_registry
             chosen_registry_score = 0.0

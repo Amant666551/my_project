@@ -29,10 +29,12 @@
 - 按句串行播放 TTS，避免互相打断
 - SpeechBrain 说话人匹配
 - 说话人到 voice 的动态路由
+- 任意已命中注册表的 voice 会固定复用同一个 `speaker_id`
 - `TURN` 汇总日志
 - 本地 voice 注册库
 - 单文件日志 `logs/pipeline.log`
 - 启动时清空日志，并按配置周期清空同一个日志文件
+- 桌面版子进程日志强制 UTF-8，避免中文 ASR 文本在控制台/前端里乱码
 
 ## 目录结构
 
@@ -42,11 +44,19 @@ files/
   main.py
   api.py
   app_logging.py
+  app_paths.py
   record_voice.py
   translator.py
   README.md
   requirements.txt
   .env
+  desktop/
+    desktop_app.py
+    desktop_app.spec
+    build_desktop.ps1
+    assets/
+      app.ico
+      splash.html
   asr/
     speaker_matcher.py
     aec.py
@@ -82,7 +92,7 @@ files/
 python orchestrator.py
 ```
 
-### 3. 启动前端控制台
+### 3. 启动网页前端控制台
 
 ```powershell
 uvicorn api:app --host 127.0.0.1 --port 8000
@@ -93,6 +103,101 @@ uvicorn api:app --host 127.0.0.1 --port 8000
 ```text
 http://127.0.0.1:8000/
 ```
+
+### 4. 启动桌面版应用
+
+```powershell
+python desktop\desktop_app.py
+```
+
+说明：
+
+- `desktop/desktop_app.py` 会先在本地启动 FastAPI 服务
+- 再用 `pywebview` 把当前前端封装成桌面窗口
+- 用户看到的是独立应用窗口，不需要手动打开浏览器
+- 桌面版关闭时，会自动尝试停止由当前窗口启动的 pipeline
+
+### 5. 打包为 Windows exe
+
+推荐直接使用项目内脚本打包：
+
+```powershell
+.\desktop\build_desktop.ps1
+```
+
+说明：
+
+- 这个脚本会自动读取 `.venv310\pyvenv.cfg`
+- 自动定位基础 Python
+- 自动补 `pywebview`
+- 自动执行 `desktop\desktop_app.spec`
+- 比手动直接敲 `pyinstaller.exe` 更稳
+
+打包完成后，生成文件通常在：
+
+```text
+dist/SpeechTranslator.exe
+```
+
+桌面资源目录：
+
+```text
+desktop/assets/
+```
+
+当前约定：
+
+- `app.ico`：Windows 桌面版图标
+- `splash.html`：桌面版启动页预留资源
+
+### 6. 打包后的目录约定
+
+桌面版 exe 运行时会优先查找这些运行资源：
+
+- `.env`
+- `models/`
+- `voice_samples/`
+
+推荐目录结构：
+
+```text
+files/
+  .env
+  models/
+  voice_samples/
+  dist/
+    SpeechTranslator.exe
+```
+
+也就是说：
+
+- `SpeechTranslator.exe` 放在 `dist/` 里可以正常工作
+- 程序会自动向上一级查找 `.env`、`models`、`voice_samples`
+- `web/` 前端静态文件会被打包进 exe，不需要你手动复制
+
+### 7. 打包版内部行为
+
+打包后，桌面应用内部会复用同一个 exe：
+
+- 默认直接打开桌面窗口
+- 当页面点击“启动主流程”时，会以内部参数方式拉起 orchestrator
+
+这样就不需要额外再带一个独立的 `orchestrator.py` 脚本文件。
+
+### 8. 源码运行和桌面版互不冲突
+
+下面这些方式仍然都可以继续用：
+
+```powershell
+python orchestrator.py
+uvicorn api:app --host 127.0.0.1 --port 8000
+python desktop\desktop_app.py
+```
+
+其中：
+
+- 源码模式适合开发和调试
+- `dist/SpeechTranslator.exe` 适合直接双击运行
 
 ## 当前模型
 
@@ -124,6 +229,7 @@ http://127.0.0.1:8000/
 说明：
 
 - 当前匹配流程是“按句提 embedding -> 会话内聚类 -> 注册库匹配 -> TTS 路由”
+- 只要某句稳定命中注册表中的某个 voice，后续再次命中同一个注册 voice 时，会优先复用之前已经绑定的那个 `speaker_id`
 - 优先使用本地缓存模型
 - 已静音 `huggingface_hub` 的常见启动 warning，不改变实际功能
 
@@ -217,13 +323,19 @@ SPEAKER_ACTIVE_MODEL_ONLY=true
 - `SPEAKER_CLUSTER_THRESHOLD`
   控制会话内是否归到已有 `speaker_x`
 - `SPEAKER_REGISTRY_THRESHOLD`
-  控制是否命中注册库里的某个 `voice_00x`
+  控制是否命中注册库里的某个已注册 voice
 - `SPEAKER_REGISTRY_MARGIN`
   控制 `top1` 和 `top2` 至少要拉开多少差距
 - `SPEAKER_ACTIVE_MODEL_ONLY=true`
   只加载和当前 `QWEN_TTS_MODEL` 一致的 voice
 
 当前这组阈值更偏向封闭集场景，也就是默认发言人主要来自本地注册库。
+
+补充理解：
+
+- `top1/top2` 只是“当前最像谁”的排序参考
+- 只有 `top1 >= SPEAKER_REGISTRY_THRESHOLD` 且与 `top2` 拉开足够差距时，才会真正路由到某个注册 voice
+- 如果不满足条件，`TURN` 里会看到 `route=none`
 
 ## 声音管理
 
@@ -295,11 +407,12 @@ python record_voice.py --list
 4. 先做会话内 `speaker_x` 聚类
 5. 再和注册库做匹配
 6. 命中后将该句 TTS 路由到对应 `voice_id`
+7. 同一个注册 voice 后续再次命中时，会继续复用已经绑定过的同一个 `speaker_id`
 
 说话人日志仍然保留这种映射关系：
 
 ```text
-speaker_x -> voice_00x
+speaker_x -> 某个已注册 voice
 ```
 
 例如：
@@ -307,6 +420,18 @@ speaker_x -> voice_00x
 ```text
 speaker_route | session=speaker_1 -> registry=voice_004 -> voice=qwen-tts-vc-...
 ```
+
+如果分数太低，也可能看到：
+
+```text
+turn | id=7 | speaker=speaker_2 | route=none | voice=default | top1=voice_004:0.117 | top2=voice_006:0.102 | asr=嗯嗯。 | mt=Hmm.
+```
+
+这表示：
+
+- 当前句子“最像” `voice_004`
+- 但相似度还没有高到足以正式认定
+- 所以不会路由到注册 voice，而是走默认 voice
 
 ## 推荐看哪几种日志
 
@@ -354,6 +479,7 @@ turn | id=3 | speaker=speaker_2 | route=voice_006 | voice=qwen-tts-vc-myvoice-..
 - 程序每次启动时先清空一次 `pipeline.log`
 - 运行过程中每隔 `LOG_ROTATE_MINUTES` 分钟清空同一个文件
 - 不再按天生成新日志文件
+- 桌面版通过管道读取主流程日志时，已强制使用 UTF-8，避免中文 ASR 内容显示成乱码
 
 对应配置：
 

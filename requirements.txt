@@ -30,3 +30,4 @@ dashscope==1.25.14
 # Infrastructure
 redis==7.3.0
 python-dotenv==1.2.2
+pywebview==5.1

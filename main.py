@@ -67,7 +67,9 @@ import redis
 import torch
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+from app_paths import runtime_path
+
+load_dotenv(runtime_path(".env"), override=True)
 
 from app_logging import configure_logging, get_logger
 from asr.audio_player import play_audio_file

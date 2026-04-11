@@ -28,7 +28,9 @@ import torch
 from dotenv import load_dotenv
 from pyrnnoise import RNNoise
 
-load_dotenv(override=True)
+from app_paths import runtime_dir, runtime_path
+
+load_dotenv(runtime_path(".env"), override=True)
 
 from app_logging import configure_logging, default_log_path, get_logger
 from asr.aec import EchoCanceller
@@ -95,7 +97,7 @@ QWEN_ASR_URL = os.getenv(
 )
 QWEN_ASR_LANGUAGE = os.getenv("QWEN_ASR_LANGUAGE", "zh")
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = str(runtime_dir())
 MODEL_PATH = os.path.join(BASE_DIR, "models", "zipformer")
 TORCH_HUB_DIR = os.getenv("TORCH_HUB_DIR", os.path.join(BASE_DIR, "models", "torch_hub"))
 SILERO_VAD_REPO_DIR = os.path.join(TORCH_HUB_DIR, "snakers4_silero-vad_master")

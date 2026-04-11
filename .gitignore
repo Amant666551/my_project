@@ -15,4 +15,10 @@ __pycache__/
 .ruff_cache/
 
 .idea/
+.vscode/
 .DS_Store
+Thumbs.db
+
+build/
+dist/
+*.log

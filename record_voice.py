@@ -33,14 +33,14 @@ import sounddevice as sd
 import soundfile as sf
 from dotenv import load_dotenv, set_key
 
+from app_paths import runtime_dir, runtime_path
 
-load_dotenv()
+BASE_DIR = runtime_dir()
+ENV_PATH = runtime_path(".env")
+VOICE_DIR = runtime_path("voice_samples")
+REGISTRY_PATH = runtime_path("voice_samples", "voice_registry.json")
 
-
-BASE_DIR = Path(__file__).resolve().parent
-ENV_PATH = BASE_DIR / ".env"
-VOICE_DIR = BASE_DIR / "voice_samples"
-REGISTRY_PATH = VOICE_DIR / "voice_registry.json"
+load_dotenv(ENV_PATH)
 
 DEFAULT_DURATION = 20
 DEFAULT_SAMPLE_RATE = 22050

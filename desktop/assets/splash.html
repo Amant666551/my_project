@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SpeechTranslator Loading</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #eff3ec;
+        --panel: rgba(255, 255, 255, 0.92);
+        --text: #1a241e;
+        --muted: #68746d;
+        --accent: #07c160;
+        --accent-soft: #dff7e9;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background:
+          radial-gradient(circle at top left, rgba(7, 193, 96, 0.14), transparent 26%),
+          linear-gradient(180deg, #f4f7f1 0%, var(--bg) 100%);
+        font-family: "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
+        color: var(--text);
+      }
+
+      .card {
+        width: min(88vw, 420px);
+        padding: 28px 24px;
+        border-radius: 28px;
+        background: var(--panel);
+        box-shadow: 0 24px 60px rgba(24, 34, 28, 0.1);
+        text-align: center;
+      }
+
+      .logo {
+        width: 72px;
+        height: 72px;
+        margin: 0 auto 18px;
+        border-radius: 22px;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(135deg, var(--accent), #49d47e);
+        color: #fff;
+        font-size: 28px;
+        font-weight: 700;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 24px;
+      }
+
+      p {
+        margin: 10px 0 0;
+        color: var(--muted);
+        line-height: 1.75;
+      }
+
+      .loading {
+        display: flex;
+        justify-content: center;
+        gap: 8px;
+        margin-top: 20px;
+      }
+
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--accent);
+        animation: pulse 1.2s infinite ease-in-out;
+      }
+
+      .dot:nth-child(2) {
+        animation-delay: 0.15s;
+      }
+
+      .dot:nth-child(3) {
+        animation-delay: 0.3s;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          transform: scale(0.85);
+          opacity: 0.45;
+        }
+        50% {
+          transform: scale(1.15);
+          opacity: 1;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="logo">声</div>
+      <h1>SpeechTranslator</h1>
+      <p>桌面版正在启动本地服务并加载前端界面。</p>
+      <div class="loading" aria-hidden="true">
+        <span class="dot"></span>
+        <span class="dot"></span>
+        <span class="dot"></span>
+      </div>
+    </main>
+  </body>
+</html>

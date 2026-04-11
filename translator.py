@@ -13,6 +13,7 @@ import os
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from app_paths import runtime_dir
 
 _LANG_NAMES = {
     "zh": "Chinese",
@@ -26,7 +27,7 @@ _LANG_NAMES = {
 
 USE_OPUS_MT = True
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = str(runtime_dir())
 DEFAULT_QWEN_DIR = os.path.join(
     BASE_DIR,
     "models",
