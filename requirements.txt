@@ -12,6 +12,7 @@ sherpa-onnx==1.12.32
 torch==2.10.0
 torchaudio==2.10.0
 pyrnnoise==0.4.3
+speechbrain>=1.0.0,<2.0.0
 
 # MT API and client
 fastapi==0.135.1

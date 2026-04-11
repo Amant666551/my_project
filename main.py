@@ -71,6 +71,7 @@ load_dotenv(override=True)
 
 from app_logging import configure_logging, get_logger
 from asr.audio_player import play_audio_file
+from asr.playback_bus import playback_bus
 
 # =============================================================================
 # USER CONFIGURATION
@@ -112,12 +113,13 @@ PROXY = None                                  # e.g. "http://127.0.0.1:7890"
 USE_QWEN_TTS_API = os.getenv("USE_QWEN_TTS_API", "false").lower() == "true"
 API_ONLY_TTS = TTS_MODE == "api_only"
 
-QWEN_TTS_MODEL = os.getenv("QWEN_TTS_MODEL", "qwen3-tts-vc-2026-01-22")
+QWEN_TTS_MODEL = os.getenv("QWEN_TTS_MODEL", "qwen3-tts-vc-realtime-2026-01-15")
 QWEN_TTS_VOICE = os.getenv("QWEN_TTS_VOICE", "").strip()
-QWEN_TTS_BASE_HTTP_API_URL = os.getenv(
-    "QWEN_TTS_BASE_HTTP_API_URL",
-    "https://dashscope.aliyuncs.com/api/v1",
+QWEN_TTS_URL = os.getenv(
+    "QWEN_TTS_URL",
+    "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
 ).rstrip("/")
+QWEN_TTS_SESSION_MODE = os.getenv("QWEN_TTS_SESSION_MODE", "commit").strip().lower()
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "").strip()
 
 # XTTS generation tuning (only used when TTS_BACKEND = "xtts")
@@ -142,6 +144,9 @@ EDGE_VOICE_MAP = {
 
 RETRY_COUNT = 3
 RETRY_DELAY = 1.0
+QWEN_TTS_RESPONSE_TIMEOUT_SEC = float(os.getenv("QWEN_TTS_RESPONSE_TIMEOUT_SEC", "30"))
+QWEN_TTS_SAMPLE_RATE = 24000
+QWEN_TTS_STREAM_BLOCKSIZE = int(os.getenv("QWEN_TTS_STREAM_BLOCKSIZE", "2400"))
 
 # =============================================================================
 
@@ -591,98 +596,230 @@ class _QwenTTSAPIBackend:
             )
         try:
             import dashscope
-        except ImportError:
-            raise ImportError("Run: pip install dashscope")
+            import sounddevice as sd
+            from dashscope.audio.qwen_tts_realtime import (
+                AudioFormat,
+                QwenTtsRealtime,
+                QwenTtsRealtimeCallback,
+            )
+        except ImportError as exc:
+            raise ImportError("dashscope with qwen_tts_realtime support is required.") from exc
+
+        class _RealtimeCallback(QwenTtsRealtimeCallback):
+            def __init__(self, owner):
+                super().__init__()
+                self._owner = owner
+
+            def on_open(self) -> None:
+                self._owner._handle_open()
+
+            def on_close(self, close_status_code, close_msg) -> None:
+                self._owner._handle_close(close_status_code, close_msg)
+
+            def on_event(self, response: str) -> None:
+                self._owner._handle_event(response)
 
         self._dashscope = dashscope
         self._dashscope.api_key = DASHSCOPE_API_KEY
-        self._dashscope.base_http_api_url = QWEN_TTS_BASE_HTTP_API_URL
+        self._sd = sd
+        self._AudioFormat = AudioFormat
+        self._QwenTtsRealtime = QwenTtsRealtime
         self._model = QWEN_TTS_MODEL
         self._voice = QWEN_TTS_VOICE
+        self._url = QWEN_TTS_URL
+        self._session_mode = (
+            QWEN_TTS_SESSION_MODE
+            if QWEN_TTS_SESSION_MODE in {"commit", "server_commit"}
+            else "commit"
+        )
+        self._timeout_sec = max(5.0, QWEN_TTS_RESPONSE_TIMEOUT_SEC)
+        self._callback = _RealtimeCallback(self)
+        self._tts = None
+        self._session_created = threading.Event()
+        self._session_updated = threading.Event()
+        self._response_done = threading.Event()
+        self._playback_finished = threading.Event()
+        self._player_stop = threading.Event()
+        self._state_lock = threading.RLock()
+        self._player_thread = None
+        self._audio_queue = None
+        self._response_error = None
+        self._first_audio_at = None
+        self._response_started_at = None
         log.info(
-            "TTS primary model | provider=qwen_api | model=%s | voice_configured=%s",
+            "TTS primary model | provider=qwen_api_realtime | model=%s | voice_configured=%s | mode=%s",
             self._model,
             bool(self._voice),
+            self._session_mode,
         )
 
-    def synthesize(self, text: str, lang: str, output_path: str) -> bool:
+    def synthesize_and_play(self, text: str, lang: str, voice: str | None = None) -> TTSTiming:
+        desired_voice = (voice or self._voice or "").strip()
+        if not desired_voice:
+            raise ValueError("No Qwen TTS voice is configured for realtime synthesis.")
+        with self._state_lock:
+            self._reset_response_state()
+            self._connect(desired_voice)
+            self._start_player()
+            self._response_started_at = time.perf_counter()
+            try:
+                self._tts.clear_appended_text()
+            except Exception:
+                pass
+            self._tts.append_text(text)
+            self._tts.commit()
+
         try:
-            response = self._dashscope.MultiModalConversation.call(
-                model=self._model,
-                api_key=DASHSCOPE_API_KEY,
-                text=text,
-                voice=self._voice,
-                stream=False,
-            )
-
-            audio_data, audio_url = self._extract_audio_payload(response)
-            if audio_data:
-                with open(output_path, "wb") as f:
-                    f.write(audio_data)
-            elif audio_url:
-                import requests
-
-                audio_resp = requests.get(audio_url, timeout=30)
-                audio_resp.raise_for_status()
-                with open(output_path, "wb") as f:
-                    f.write(audio_resp.content)
-            else:
-                raise ValueError(
-                    "Qwen TTS response did not contain audio data or an audio URL."
+            if not self._response_done.wait(timeout=self._timeout_sec):
+                self._stop_player()
+                raise TimeoutError(
+                    f"Qwen realtime TTS timed out after {self._timeout_sec:.1f}s waiting for response.done."
+                )
+            if self._response_error is not None:
+                self._stop_player()
+                raise RuntimeError(self._response_error)
+            if not self._playback_finished.wait(timeout=self._timeout_sec):
+                self._stop_player()
+                raise TimeoutError(
+                    f"Qwen realtime TTS playback did not finish within {self._timeout_sec:.1f}s."
                 )
 
-            size = Path(output_path).stat().st_size if Path(output_path).exists() else 0
-            if size < 100:
-                raise ValueError(f"Downloaded Qwen audio is too small: {size} bytes")
-            return True
+            provider_ready_ms = 0.0
+            if self._first_audio_at is not None and self._response_started_at is not None:
+                provider_ready_ms = (self._first_audio_at - self._response_started_at) * 1000.0
+            total_ms = 0.0
+            if self._response_started_at is not None:
+                total_ms = (time.perf_counter() - self._response_started_at) * 1000.0
+            return TTSTiming(
+                provider="qwen_api",
+                mode="streaming",
+                provider_ready_ms=provider_ready_ms,
+                total_ms=total_ms,
+            )
+        finally:
+            with self._state_lock:
+                self._safe_close()
+
+    def _connect(self, voice: str) -> None:
+        self._session_created.clear()
+        self._session_updated.clear()
+        self._tts = self._QwenTtsRealtime(
+            model=self._model,
+            callback=self._callback,
+            url=self._url,
+        )
+        self._tts.connect()
+        if not self._session_created.wait(timeout=5.0):
+            raise TimeoutError("Qwen realtime TTS session was not created within 5s.")
+        self._tts.update_session(
+            voice=voice,
+            response_format=self._AudioFormat.PCM_24000HZ_MONO_16BIT,
+            mode=self._session_mode,
+        )
+        if not self._session_updated.wait(timeout=5.0):
+            raise TimeoutError("Qwen realtime TTS session was not updated within 5s.")
+
+    def _reset_response_state(self) -> None:
+        self._response_done.clear()
+        self._playback_finished.clear()
+        self._player_stop.clear()
+        self._audio_queue = queue.Queue()
+        self._player_thread = None
+        self._response_error = None
+        self._first_audio_at = None
+        self._response_started_at = None
+
+    def _start_player(self) -> None:
+        self._player_thread = threading.Thread(
+            target=self._play_audio_stream,
+            daemon=True,
+            name="qwen-tts-realtime-player",
+        )
+        self._player_thread.start()
+
+    def _stop_player(self) -> None:
+        self._player_stop.set()
+        if self._audio_queue is not None:
+            self._audio_queue.put(None)
+        if self._player_thread is not None:
+            self._player_thread.join(timeout=2.0)
+        self._playback_finished.set()
+
+    def _play_audio_stream(self) -> None:
+        playback_bus.begin_playback()
+        try:
+            with self._sd.RawOutputStream(
+                samplerate=QWEN_TTS_SAMPLE_RATE,
+                channels=1,
+                dtype="int16",
+                blocksize=QWEN_TTS_STREAM_BLOCKSIZE,
+            ) as stream:
+                while not self._player_stop.is_set():
+                    chunk = self._audio_queue.get()
+                    if chunk is None:
+                        break
+                    if not chunk:
+                        continue
+                    stream.write(chunk)
+                    samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                    playback_bus.push_render_frame(samples, sample_rate=QWEN_TTS_SAMPLE_RATE)
+                stream.stop()
+        finally:
+            playback_bus.end_playback()
+            self._playback_finished.set()
+
+    def _handle_open(self) -> None:
+        pass
+
+    def _handle_close(self, close_status_code, close_msg) -> None:
+        if not self._response_done.is_set():
+            self._response_error = (
+                f"Qwen realtime TTS connection closed unexpectedly: code={close_status_code}, msg={close_msg}"
+            )
+            self._response_done.set()
+        if self._audio_queue is not None:
+            self._audio_queue.put(None)
+
+    def _handle_event(self, response) -> None:
+        try:
+            event_type = response.get("type")
+            if event_type == "session.created":
+                self._session_created.set()
+                return
+            if event_type == "session.updated":
+                self._session_updated.set()
+                return
+            if event_type == "response.audio.delta":
+                delta = response.get("delta")
+                if not delta:
+                    return
+                if self._first_audio_at is None:
+                    self._first_audio_at = time.perf_counter()
+                self._audio_queue.put(base64.b64decode(delta))
+                return
+            if event_type == "response.done":
+                self._response_done.set()
+                if self._audio_queue is not None:
+                    self._audio_queue.put(None)
+                return
+            if event_type == "error":
+                self._response_error = json.dumps(response, ensure_ascii=False)
+                self._response_done.set()
+                if self._audio_queue is not None:
+                    self._audio_queue.put(None)
         except Exception as exc:
-            log.error("Qwen TTS synthesis failed: %s", exc)
-            return False
+            self._response_error = f"Qwen realtime TTS callback error: {exc}"
+            self._response_done.set()
+            if self._audio_queue is not None:
+                self._audio_queue.put(None)
 
-    def _extract_audio_payload(self, response) -> tuple[Optional[bytes], Optional[str]]:
-        audio_candidates = []
-
-        def _get_mapping_value(obj, key):
-            if obj is None:
-                return None
-            if isinstance(obj, dict):
-                return obj.get(key)
-            try:
-                return obj[key]
-            except Exception:
-                return None
-
-        output = _get_mapping_value(response, "output")
-        if output is not None:
-            audio_candidates.append(_get_mapping_value(output, "audio"))
-
-        if isinstance(response, dict):
-            audio_candidates.append(response.get("output", {}).get("audio"))
-
-        for audio in audio_candidates:
-            if not audio:
-                continue
-            if isinstance(audio, dict):
-                if audio.get("data"):
-                    try:
-                        return base64.b64decode(audio["data"]), None
-                    except Exception:
-                        pass
-                if audio.get("url"):
-                    return None, audio["url"]
-            audio_data = _get_mapping_value(audio, "data")
-            if audio_data:
-                try:
-                    return base64.b64decode(audio_data), None
-                except Exception:
-                    pass
-            audio_url = _get_mapping_value(audio, "url")
-            if audio_url:
-                return None, audio_url
-            if isinstance(audio, str):
-                return None, audio
-
-        return None, None
+    def _safe_close(self) -> None:
+        try:
+            if self._tts is not None:
+                self._tts.close()
+        except Exception:
+            pass
+        self._tts = None
 
 
 # =============================================================================
@@ -742,44 +879,27 @@ def _play_file(path: str) -> None:
 # Public API
 # =============================================================================
 
-def speak(text: str, lang: str = "en") -> TTSTiming | None:
+def speak(text: str, lang: str = "en", voice: str | None = None) -> TTSTiming | None:
     if not text or not text.strip():
         return None
 
     start_time = time.perf_counter()
     try:
         if USE_QWEN_TTS_API and _qwen_tts_backend is not None:
-            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            path = tmp.name
-            tmp.close()
             try:
-                ok = _qwen_tts_backend.synthesize(text, lang, path)
-                if not ok:
-                    if API_ONLY_TTS:
-                        log.error("Qwen TTS API failed and API-only mode is enabled.")
-                        return None
-                    log.warning("Qwen TTS API failed, falling back to local backend.")
-                else:
-                    size = Path(path).stat().st_size if Path(path).exists() else 0
-                    if size < 100:
-                        log.error("Qwen TTS output too small (%d B).", size)
-                    else:
-                        provider_ready_ms = (time.perf_counter() - start_time) * 1000.0
-                        log.info("TTS provider | provider=qwen_api | model=%s", QWEN_TTS_MODEL)
-                        _play_file(path)
-                        total_ms = (time.perf_counter() - start_time) * 1000.0
-                        return TTSTiming(
-                            provider="qwen_api",
-                            mode="file",
-                            provider_ready_ms=provider_ready_ms,
-                            total_ms=total_ms,
-                        )
-            finally:
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError:
-                    pass
+                timing = _qwen_tts_backend.synthesize_and_play(text, lang, voice=voice)
+                log.info(
+                    "TTS provider | provider=qwen_api | model=%s | mode=%s | voice=%s",
+                    QWEN_TTS_MODEL,
+                    timing.mode,
+                    voice or QWEN_TTS_VOICE or "default",
+                )
+                return timing
+            except Exception as exc:
+                if API_ONLY_TTS:
+                    log.error("Qwen TTS API failed and API-only mode is enabled: %s", exc)
+                    return None
+                log.warning("Qwen TTS API failed, falling back to local backend: %s", exc)
 
         if _backend is None:
             log.error("No TTS backend available for fallback.")

@@ -3,6 +3,9 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
+import time
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -36,6 +39,14 @@ def _log_level(name: str, default: int = logging.INFO) -> int:
     return getattr(logging, value, default)
 
 
+def _daily_log_only() -> bool:
+    return _env_bool("LOG_DAILY_ONLY", True)
+
+
+def _log_rotate_minutes() -> int:
+    return max(0, _env_int("LOG_ROTATE_MINUTES", 0))
+
+
 def _console_mode() -> str:
     value = os.getenv("LOG_CONSOLE_MODE", "minimal").strip().lower()
     return _normalize_mode(value, default="minimal")
@@ -64,6 +75,8 @@ def _is_core_result_record(record: logging.LogRecord, message: str) -> bool:
     if record.name == f"{_APP_LOGGER_PREFIX}.ASR" and message.startswith("final | text="):
         return True
     if record.name == f"{_APP_LOGGER_PREFIX}.MT" and message.startswith("result | text="):
+        return True
+    if record.name == f"{_APP_LOGGER_PREFIX}.TURN" and message.startswith("turn | "):
         return True
     if record.name == f"{_APP_LOGGER_PREFIX}.TTS" and message.startswith("TTS provider |"):
         return True
@@ -157,6 +170,8 @@ class _MinimalConsoleFormatter(logging.Formatter):
             return f"[ASR final  ]: {message.removeprefix('final | text=')}"
         if record.name == f"{_APP_LOGGER_PREFIX}.MT" and message.startswith("result | text="):
             return f"[MT  ]: {message.removeprefix('result | text=')}"
+        if record.name == f"{_APP_LOGGER_PREFIX}.TURN" and message.startswith("turn | "):
+            return f"{self.formatTime(record, self.datefmt)} [TURN] {message}"
         if record.name == f"{_APP_LOGGER_PREFIX}.TTS" and message.startswith("TTS provider |"):
             return f"{self.formatTime(record, self.datefmt)} [TTS] {message}"
         return message
@@ -166,7 +181,91 @@ def default_log_path() -> Path:
     base_dir = Path(__file__).resolve().parent
     log_dir = Path(os.getenv("LOG_DIR", str(base_dir / "logs")))
     file_name = os.getenv("LOG_FILE_NAME", "pipeline.log").strip() or "pipeline.log"
-    return log_dir / file_name
+    if _log_rotate_minutes() > 0:
+        return log_dir / file_name
+    if not _daily_log_only():
+        return log_dir / file_name
+
+    base_name = Path(file_name)
+    today = datetime.now().strftime("%Y-%m-%d")
+    daily_name = f"{base_name.stem}-{today}{base_name.suffix or '.log'}"
+    return log_dir / daily_name
+
+
+def _cleanup_expired_daily_logs(log_dir: Path, active_log_path: Path) -> None:
+    if not _daily_log_only():
+        return
+
+    try:
+        active_name = active_log_path.name
+        active_prefix = active_name.split("-", 1)[0]
+        for candidate in log_dir.iterdir():
+            if not candidate.is_file():
+                continue
+            if candidate == active_log_path:
+                continue
+            if not candidate.name.startswith(active_prefix):
+                continue
+            try:
+                candidate.unlink()
+            except OSError:
+                continue
+    except OSError:
+        return
+
+
+class _PeriodicTruncateFileHandler(logging.FileHandler):
+    def __init__(self, filename: Path, interval_minutes: int, encoding: str = "utf-8"):
+        self.interval_seconds = max(60, interval_minutes * 60)
+        self._stop_event = threading.Event()
+        super().__init__(filename, mode="w", encoding=encoding, delay=False)
+        self._initialize_rotation_state()
+        self._worker = threading.Thread(
+            target=self._run_periodic_truncate,
+            name="pipeline-log-truncate",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def _initialize_rotation_state(self) -> None:
+        self._next_truncate_at = time.time() + self.interval_seconds
+
+    def _run_periodic_truncate(self) -> None:
+        while not self._stop_event.is_set():
+            wait_seconds = max(1.0, self._next_truncate_at - time.time())
+            if self._stop_event.wait(wait_seconds):
+                return
+            self._maybe_truncate()
+
+    def _maybe_truncate(self) -> None:
+        now = time.time()
+        if now < self._next_truncate_at:
+            return
+        self.acquire()
+        try:
+            now = time.time()
+            if now < self._next_truncate_at:
+                return
+            self._truncate_file_locked(now)
+        finally:
+            self.release()
+
+    def _truncate_file_locked(self, now: float) -> None:
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        self.mode = "w"
+        self.stream = self._open()
+        self.mode = "a"
+        self._next_truncate_at = now + self.interval_seconds
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._maybe_truncate()
+        super().emit(record)
+
+    def close(self) -> None:
+        self._stop_event.set()
+        super().close()
 
 
 def configure_logging() -> None:
@@ -198,12 +297,21 @@ def configure_logging() -> None:
     if _env_bool("LOG_FILE_ENABLED", True):
         log_path = default_log_path()
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
-            log_path,
-            maxBytes=max(1, _env_int("LOG_MAX_BYTES", 5 * 1024 * 1024)),
-            backupCount=max(1, _env_int("LOG_BACKUP_COUNT", 3)),
-            encoding="utf-8",
-        )
+        _cleanup_expired_daily_logs(log_path.parent, log_path)
+        rotate_minutes = _log_rotate_minutes()
+        if rotate_minutes > 0:
+            file_handler = _PeriodicTruncateFileHandler(
+                log_path,
+                interval_minutes=rotate_minutes,
+                encoding="utf-8",
+            )
+        else:
+            file_handler = RotatingFileHandler(
+                log_path,
+                maxBytes=max(1, _env_int("LOG_MAX_BYTES", 5 * 1024 * 1024)),
+                backupCount=max(1, _env_int("LOG_BACKUP_COUNT", 3)),
+                encoding="utf-8",
+            )
         file_handler.setFormatter(formatter)
         file_mode = _file_mode()
         if file_mode == "minimal":

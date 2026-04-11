@@ -11,6 +11,7 @@ interrupt another while ASR continues listening.
 """
 
 import base64
+import json
 import os
 import queue
 import sys
@@ -32,6 +33,7 @@ load_dotenv(override=True)
 from app_logging import configure_logging, default_log_path, get_logger
 from asr.aec import EchoCanceller
 from asr.hotword_manager import HotwordManager
+from asr.speaker_matcher import SpeakerDecision, SpeakerMatcher
 from mt.prompt_context import MTPromptContext
 from mt.scene_analyzer import SceneAnalysis, parse_scene_analysis
 
@@ -95,6 +97,8 @@ QWEN_ASR_LANGUAGE = os.getenv("QWEN_ASR_LANGUAGE", "zh")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "models", "zipformer")
+TORCH_HUB_DIR = os.getenv("TORCH_HUB_DIR", os.path.join(BASE_DIR, "models", "torch_hub"))
+SILERO_VAD_REPO_DIR = os.path.join(TORCH_HUB_DIR, "snakers4_silero-vad_master")
 
 SAMPLE_RATE = 16000
 FRAME_SIZE = 512
@@ -131,6 +135,7 @@ ADAPTIVE_ENERGY_VAD_CEILING = float(os.getenv("ADAPTIVE_ENERGY_VAD_CEILING", "0.
 PRE_SPEECH_FRAMES = 8
 VAD_SMOOTHING_FRAMES = 5
 MAX_SILENCE_FRAMES = 30
+SILERO_VAD_ENABLED = os.getenv("SILERO_VAD_ENABLED", "true").lower() == "true"
 
 LANGUAGE_NAME_MAP = {
     "zh": "Chinese",
@@ -159,6 +164,8 @@ queue_log = get_logger("Queue")
 metrics_log = get_logger("ASR.METRICS")
 hotword_log = get_logger("ASR.HOTWORD")
 mt_context_log = get_logger("MT.CONTEXT")
+speaker_log = get_logger("SPEAKER")
+turn_log = get_logger("TURN")
 
 
 _trace_counter = count(1)
@@ -197,6 +204,17 @@ class _PipelineTrace:
 class _ASRTextEvent:
     text: str
     trace: _PipelineTrace
+    speaker_id: str | None = None
+    voice_id: str | None = None
+    speaker_registry_label: str | None = None
+    speaker_registry_sample_alias: str | None = None
+    speaker_session_score: float = 0.0
+    speaker_registry_score: float = 0.0
+    speaker_registry_margin: float = 0.0
+    speaker_best_registry_label: str | None = None
+    speaker_best_registry_score: float = 0.0
+    speaker_second_registry_label: str | None = None
+    speaker_second_registry_score: float = 0.0
 
 
 @dataclass
@@ -204,6 +222,8 @@ class _TTSEvent:
     text: str
     lang: str
     trace: _PipelineTrace
+    speaker_id: str | None = None
+    voice_id: str | None = None
 
 
 def _new_trace() -> _PipelineTrace:
@@ -225,6 +245,29 @@ def _log_trace_latency(trace: _PipelineTrace) -> None:
         _elapsed_ms(trace.asr_started_at, trace.tts_ready_at),
         trace.mt_scene_cache_hit,
         trace.asr_partial_count,
+    )
+
+
+def _clip_text(text: str, limit: int = 72) -> str:
+    cleaned = (text or "").replace("\r", " ").replace("\n", " ").strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 1)] + "..."
+
+
+def _log_turn_summary(event: _ASRTextEvent, translation: str) -> None:
+    turn_log.info(
+        "turn | id=%s | speaker=%s | route=%s | voice=%s | top1=%s:%.3f | top2=%s:%.3f | asr=%s | mt=%s",
+        event.trace.trace_id,
+        event.speaker_id or "unknown",
+        event.speaker_registry_sample_alias or event.speaker_registry_label or "none",
+        event.voice_id or "default",
+        event.speaker_best_registry_label or "none",
+        event.speaker_best_registry_score,
+        event.speaker_second_registry_label or "none",
+        event.speaker_second_registry_score,
+        _clip_text(event.text),
+        _clip_text(translation),
     )
 
 
@@ -605,6 +648,7 @@ class _FrontEndDecision:
     rms: float = 0.0
     noise_floor: float = ENERGY_THRESHOLD
     dynamic_energy_threshold: float = ENERGY_THRESHOLD
+    utterance_audio: np.ndarray | None = None
 
 
 class _SpeechFrontEnd:
@@ -612,13 +656,9 @@ class _SpeechFrontEnd:
         self.echo_canceller = EchoCanceller(frame_size=FRAME_SIZE, sample_rate=SAMPLE_RATE)
         get_logger("AEC").info(self.echo_canceller.describe())
         self.rnnoise = RNNoise(sample_rate=SAMPLE_RATE)
-        self.vad_model, _ = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad",
-            model="silero_vad",
-            force_reload=False,
-            verbose=False,
-        )
-        self.vad_model.eval()
+        self.vad_model = None
+        self._silero_available = False
+        self._init_vad_model()
         self._pre_roll: deque[np.ndarray] = deque(maxlen=PRE_SPEECH_FRAMES)
         self._vad_history: deque[float] = deque(maxlen=VAD_SMOOTHING_FRAMES)
         self._in_speech = False
@@ -628,6 +668,47 @@ class _SpeechFrontEnd:
         self._hpf_prev_x = 0.0
         self._hpf_prev_y = 0.0
         self._noise_floor = ENERGY_THRESHOLD
+        self._utterance_audio_chunks: list[np.ndarray] = []
+
+    def _init_vad_model(self) -> None:
+        if not SILERO_VAD_ENABLED:
+            asr_log.warning("Silero VAD disabled by config; frontend will use energy-gated fallback.")
+            return
+        try:
+            os.makedirs(TORCH_HUB_DIR, exist_ok=True)
+            torch.hub.set_dir(TORCH_HUB_DIR)
+        except Exception as exc:
+            asr_log.warning("Failed to prepare torch hub dir '%s': %s", TORCH_HUB_DIR, exc)
+
+        try:
+            if os.path.isdir(SILERO_VAD_REPO_DIR):
+                vad_model, _ = torch.hub.load(
+                    repo_or_dir=SILERO_VAD_REPO_DIR,
+                    model="silero_vad",
+                    source="local",
+                    force_reload=False,
+                    verbose=False,
+                )
+                asr_log.info("Silero VAD loaded from local cache: %s", SILERO_VAD_REPO_DIR)
+            else:
+                vad_model, _ = torch.hub.load(
+                    repo_or_dir="snakers4/silero-vad",
+                    model="silero_vad",
+                    force_reload=False,
+                    verbose=False,
+                    trust_repo=True,
+                )
+                asr_log.info("Silero VAD downloaded via torch.hub into %s", TORCH_HUB_DIR)
+            vad_model.eval()
+            self.vad_model = vad_model
+            self._silero_available = True
+        except Exception as exc:
+            self.vad_model = None
+            self._silero_available = False
+            asr_log.warning(
+                "Silero VAD unavailable, frontend will fall back to energy-gated VAD only: %s",
+                exc,
+            )
 
     def _update_noise_floor(self, rms: float, vad_prob: float) -> None:
         if not ADAPTIVE_ENERGY_ENABLED:
@@ -690,7 +771,12 @@ class _SpeechFrontEnd:
             return np.empty(0, dtype=np.float32)
         return np.concatenate(chunks, dtype=np.float32)
 
-    def _vad_prob(self, audio: np.ndarray) -> float:
+    def _vad_prob(self, audio: np.ndarray, rms: float | None = None) -> float:
+        if self.vad_model is None:
+            if rms is None:
+                rms = float(np.sqrt(np.mean(np.square(audio), dtype=np.float32)))
+            baseline = max(ENERGY_THRESHOLD, 1e-4)
+            return float(max(0.0, min(1.0, rms / baseline)))
         tensor = torch.from_numpy(audio.astype(np.float32, copy=False)).unsqueeze(0)
         with torch.no_grad():
             return float(self.vad_model(tensor, SAMPLE_RATE).item())
@@ -702,6 +788,7 @@ class _SpeechFrontEnd:
         self._speech_frames = 0
         self._start_frames = 0
         self._silence_frames = 0
+        self._utterance_audio_chunks = []
 
     def process_audio(self, audio: np.ndarray) -> _FrontEndDecision:
         cleaned = self.echo_canceller.process_capture(audio)
@@ -711,7 +798,7 @@ class _SpeechFrontEnd:
             return _FrontEndDecision(feed_chunks=[])
 
         rms = float(np.sqrt(np.mean(np.square(denoised), dtype=np.float32)))
-        vad_prob = self._vad_prob(denoised)
+        vad_prob = self._vad_prob(denoised, rms=rms)
         self._vad_history.append(vad_prob)
         smoothed_prob = float(sum(self._vad_history) / len(self._vad_history))
         self._update_noise_floor(rms, smoothed_prob)
@@ -740,6 +827,7 @@ class _SpeechFrontEnd:
             self._silence_frames = 0
             self._start_frames = 0
             feed_chunks = list(self._pre_roll)
+            self._utterance_audio_chunks = [chunk.copy() for chunk in feed_chunks]
             self._pre_roll.clear()
             return _FrontEndDecision(
                 feed_chunks=feed_chunks,
@@ -752,6 +840,7 @@ class _SpeechFrontEnd:
             )
 
         self._speech_frames += 1
+        self._utterance_audio_chunks.append(denoised.copy())
         if continue_gate:
             self._silence_frames = 0
         else:
@@ -759,7 +848,10 @@ class _SpeechFrontEnd:
 
         should_finalize = self._silence_frames >= MAX_SILENCE_FRAMES
         speech_frames = self._speech_frames
+        utterance_audio = None
         if should_finalize:
+            if self._utterance_audio_chunks:
+                utterance_audio = np.concatenate(self._utterance_audio_chunks, dtype=np.float32)
             self._reset_utterance_state()
 
         return _FrontEndDecision(
@@ -771,7 +863,10 @@ class _SpeechFrontEnd:
             rms=rms,
             noise_floor=self._noise_floor,
             dynamic_energy_threshold=energy_threshold,
+            utterance_audio=utterance_audio,
         )
+
+_speaker_matcher = SpeakerMatcher.from_env(base_dir=BASE_DIR, sample_rate=SAMPLE_RATE)
 
 
 class LocalStreamingASR:
@@ -794,8 +889,10 @@ class LocalStreamingASR:
             MODEL_PATH,
         )
         asr_log.info(
-            "vad | repo=snakers4/silero-vad | model=silero_vad | start_threshold=%.2f | "
+            "vad | silero_enabled=%s | torch_hub_dir=%s | start_threshold=%.2f | "
             "end_threshold=%.2f | energy_threshold=%.4f | adaptive_energy=%s | max_silence_frames=%s",
+            SILERO_VAD_ENABLED,
+            TORCH_HUB_DIR,
             VAD_START_THRESHOLD,
             VAD_END_THRESHOLD,
             ENERGY_THRESHOLD,
@@ -856,6 +953,7 @@ class LocalStreamingASR:
             final = self.recognizer.get_result(self.stream).strip() or self.last_text
             trace = self._active_trace or _new_trace()
             trace.asr_final_at = _now()
+            speaker_decision = _speaker_matcher.match_utterance(decision.utterance_audio)
             self._reset()
             if decision.should_reset:
                 return None
@@ -863,7 +961,39 @@ class LocalStreamingASR:
                 final = _postprocess_asr_final(final)
                 _asr_metrics.observe_final(final)
                 asr_log.info("final | text=%s", final)
-                return _ASRTextEvent(text=final, trace=trace)
+                return _ASRTextEvent(
+                    text=final,
+                    trace=trace,
+                    speaker_id=speaker_decision.speaker_id if speaker_decision else None,
+                    voice_id=speaker_decision.voice_id if speaker_decision else None,
+                    speaker_registry_label=(
+                        speaker_decision.registry_label if speaker_decision else None
+                    ),
+                    speaker_registry_sample_alias=(
+                        speaker_decision.registry_sample_alias if speaker_decision else None
+                    ),
+                    speaker_session_score=(
+                        speaker_decision.session_score if speaker_decision else 0.0
+                    ),
+                    speaker_registry_score=(
+                        speaker_decision.registry_score if speaker_decision else 0.0
+                    ),
+                    speaker_registry_margin=(
+                        speaker_decision.registry_margin if speaker_decision else 0.0
+                    ),
+                    speaker_best_registry_label=(
+                        speaker_decision.best_registry_label if speaker_decision else None
+                    ),
+                    speaker_best_registry_score=(
+                        speaker_decision.best_registry_score if speaker_decision else 0.0
+                    ),
+                    speaker_second_registry_label=(
+                        speaker_decision.second_registry_label if speaker_decision else None
+                    ),
+                    speaker_second_registry_score=(
+                        speaker_decision.second_registry_score if speaker_decision else 0.0
+                    ),
+                )
 
         return None
 
@@ -937,6 +1067,8 @@ class QwenStreamingASR:
         self._conversation = None
         self._active_trace: _PipelineTrace | None = None
         self._pending_traces: deque[_PipelineTrace] = deque()
+        self._pending_speakers: deque[SpeakerDecision | None] = deque()
+        self._deferred_finals: deque[str] = deque()
         self._last_trace_candidate: _PipelineTrace | None = None
         self._last_partial_text = ""
         self._connect_conversation()
@@ -1006,6 +1138,9 @@ class QwenStreamingASR:
                 self._active_trace.asr_speech_end_at = _now()
             if not decision.should_reset:
                 self._pending_traces.append(self._active_trace)
+                self._pending_speakers.append(
+                    _speaker_matcher.match_utterance(decision.utterance_audio)
+                )
                 self._last_trace_candidate = self._active_trace
             self._active_trace = None
         current_trace = self._active_trace or (self._pending_traces[-1] if self._pending_traces else self._last_trace_candidate)
@@ -1017,28 +1152,77 @@ class QwenStreamingASR:
             if partial and partial != self._last_partial_text and current_trace is not None:
                 self._last_partial_text = partial
                 _observe_asr_partial(current_trace, partial)
-        try:
-            final = self._final_queue.get_nowait()
+        while True:
+            try:
+                final = self._final_queue.get_nowait()
+            except queue.Empty:
+                break
+            if final:
+                self._deferred_finals.append(final)
+
+        if not self._deferred_finals:
+            return None
+
+        if self._pending_traces:
+            final = self._deferred_finals.popleft()
             if self._pending_traces:
                 trace = self._pending_traces.popleft()
-            elif self._active_trace is not None:
-                trace = self._active_trace
-            elif self._last_trace_candidate is not None:
-                trace = self._last_trace_candidate
-            else:
-                trace = _new_trace()
-                trace.asr_started_at = _now()
-            if trace.asr_speech_end_at <= 0.0:
-                trace.asr_speech_end_at = _now()
-            trace.asr_final_at = _now()
-            self._last_trace_candidate = trace
-            self._last_partial_text = ""
-            final = _postprocess_asr_final(final)
-            _asr_metrics.observe_final(final)
-            asr_log.info("final | text=%s", final)
-            return _ASRTextEvent(text=final, trace=trace)
-        except queue.Empty:
+                speaker_decision = self._pending_speakers.popleft() if self._pending_speakers else None
+        elif self._active_trace is not None:
+            # The remote final transcript arrived before local VAD finalized the utterance.
+            # Hold it until we have the matching speaker decision.
             return None
+        elif self._last_trace_candidate is not None:
+            final = self._deferred_finals.popleft()
+            trace = self._last_trace_candidate
+            speaker_decision = None
+        else:
+            final = self._deferred_finals.popleft()
+            trace = _new_trace()
+            trace.asr_started_at = _now()
+            speaker_decision = None
+
+        if trace.asr_speech_end_at <= 0.0:
+            trace.asr_speech_end_at = _now()
+        trace.asr_final_at = _now()
+        self._last_trace_candidate = trace
+        self._last_partial_text = ""
+        final = _postprocess_asr_final(final)
+        _asr_metrics.observe_final(final)
+        asr_log.info("final | text=%s", final)
+        return _ASRTextEvent(
+            text=final,
+            trace=trace,
+            speaker_id=speaker_decision.speaker_id if speaker_decision else None,
+            voice_id=speaker_decision.voice_id if speaker_decision else None,
+            speaker_registry_label=(
+                speaker_decision.registry_label if speaker_decision else None
+            ),
+            speaker_registry_sample_alias=(
+                speaker_decision.registry_sample_alias if speaker_decision else None
+            ),
+            speaker_session_score=(
+                speaker_decision.session_score if speaker_decision else 0.0
+            ),
+            speaker_registry_score=(
+                speaker_decision.registry_score if speaker_decision else 0.0
+            ),
+            speaker_registry_margin=(
+                speaker_decision.registry_margin if speaker_decision else 0.0
+            ),
+            speaker_best_registry_label=(
+                speaker_decision.best_registry_label if speaker_decision else None
+            ),
+            speaker_best_registry_score=(
+                speaker_decision.best_registry_score if speaker_decision else 0.0
+            ),
+            speaker_second_registry_label=(
+                speaker_decision.second_registry_label if speaker_decision else None
+            ),
+            speaker_second_registry_score=(
+                speaker_decision.second_registry_score if speaker_decision else 0.0
+            ),
+        )
 
     def close(self) -> None:
         try:
@@ -1234,7 +1418,7 @@ def _audio_callback(indata, frames, time_info, status):
 def _run_tts(event: _TTSEvent) -> None:
     try:
         event.trace.tts_started_at = _now()
-        result = tts_speak(event.text, lang=event.lang)
+        result = tts_speak(event.text, lang=event.lang, voice=event.voice_id)
         event.trace.tts_done_at = _now()
         if result is not None:
             event.trace.tts_ready_at = event.trace.tts_started_at + (result.provider_ready_ms / 1000.0)
@@ -1275,7 +1459,27 @@ def _mt_worker(stop_event: threading.Event) -> None:
         try:
             translation = translate(event.text, event.trace)
             if translation:
-                _put_latest(_tts_q, _TTSEvent(text=translation, lang=MT_TARGET_LANG, trace=event.trace), "tts")
+                _log_turn_summary(event, translation)
+                if event.speaker_id:
+                    speaker_log.info(
+                        "speaker_route | session=%s -> registry=%s -> voice=%s | session_score=%.3f | registry_score=%.3f",
+                        event.speaker_id,
+                        event.speaker_registry_sample_alias or event.speaker_registry_label or "none",
+                        event.voice_id or "default",
+                        event.speaker_session_score,
+                        event.speaker_registry_score,
+                    )
+                _put_latest(
+                    _tts_q,
+                    _TTSEvent(
+                        text=translation,
+                        lang=MT_TARGET_LANG,
+                        trace=event.trace,
+                        speaker_id=event.speaker_id,
+                        voice_id=event.voice_id,
+                    ),
+                    "tts",
+                )
         finally:
             _asr_text_q.task_done()
 

@@ -44,7 +44,14 @@ REGISTRY_PATH = VOICE_DIR / "voice_registry.json"
 
 DEFAULT_DURATION = 20
 DEFAULT_SAMPLE_RATE = 22050
-DEFAULT_TARGET_MODEL = os.getenv("QWEN_TTS_MODEL", "qwen3-tts-vc-2026-01-22")
+DEFAULT_REALTIME_TARGET_MODEL = "qwen3-tts-vc-realtime-2026-01-15"
+DEFAULT_REALTIME_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+_env_target_model = os.getenv("QWEN_TTS_MODEL", "").strip()
+DEFAULT_TARGET_MODEL = (
+    _env_target_model
+    if _env_target_model.startswith("qwen3-tts-vc-realtime")
+    else DEFAULT_REALTIME_TARGET_MODEL
+)
 DEFAULT_PREFERRED_NAME = os.getenv("QWEN_TTS_PREFERRED_NAME", "myvoice")
 DEFAULT_CUSTOMIZATION_URL = os.getenv(
     "QWEN_TTS_CUSTOMIZATION_URL",
@@ -106,6 +113,32 @@ def _set_env_value(key: str, value: str) -> None:
     _require_env_path()
     set_key(str(ENV_PATH), key, value)
     os.environ[key] = value
+
+
+def _is_realtime_vc_model(model_name: str) -> bool:
+    normalized = (model_name or "").strip().lower()
+    return normalized.startswith("qwen3-tts-vc-realtime")
+
+
+def _sync_tts_env(
+    *,
+    voice_id: str,
+    sample_path: str,
+    target_model: str,
+) -> None:
+    _set_env_value("QWEN_TTS_MODEL", target_model)
+    _set_env_value("QWEN_TTS_VOICE", voice_id)
+    _set_env_value("QWEN_TTS_VOICE_SAMPLE", sample_path)
+    _set_env_value("VOICE_SAMPLE", sample_path)
+    if _is_realtime_vc_model(target_model):
+        _set_env_value(
+            "QWEN_TTS_URL",
+            os.getenv("QWEN_TTS_URL", DEFAULT_REALTIME_URL) or DEFAULT_REALTIME_URL,
+        )
+        _set_env_value(
+            "QWEN_TTS_SESSION_MODE",
+            os.getenv("QWEN_TTS_SESSION_MODE", "commit") or "commit",
+        )
 
 
 def record_sample(
@@ -232,11 +265,70 @@ def activate_voice(entry_index: int) -> dict:
     chosen = entries[entry_index - 1]
     _save_registry(entries)
 
-    _set_env_value("QWEN_TTS_VOICE", chosen["qwen_tts_voice"])
-    _set_env_value("QWEN_TTS_VOICE_SAMPLE", chosen["sample_path"])
-    _set_env_value("VOICE_SAMPLE", chosen["sample_path"])
+    _sync_tts_env(
+        voice_id=chosen["qwen_tts_voice"],
+        sample_path=chosen["sample_path"],
+        target_model=chosen["target_model"],
+    )
 
     return chosen
+
+
+def delete_voices(entry_indices: list[int]) -> tuple[list[dict], dict | None]:
+    entries = _load_registry()
+    if not entries:
+        raise RuntimeError("Voice registry is empty.")
+    if not entry_indices:
+        raise ValueError("No voice indices provided for deletion.")
+
+    unique_indices = sorted(set(entry_indices))
+    for entry_index in unique_indices:
+        if entry_index < 1 or entry_index > len(entries):
+            raise ValueError(f"Invalid voice index: {entry_index}")
+
+    deleted_entries: list[dict] = []
+    deleted_sample_paths: set[Path] = set()
+    remaining_entries: list[dict] = []
+    active_removed = False
+
+    for idx, entry in enumerate(entries, start=1):
+        if idx in unique_indices:
+            deleted_entries.append(entry)
+            if entry.get("active"):
+                active_removed = True
+            sample_rel = str(entry.get("sample_path", "")).strip()
+            if sample_rel:
+                deleted_sample_paths.add(BASE_DIR / sample_rel.replace("/", os.sep))
+            continue
+        remaining_entries.append(entry)
+
+    for sample_path in sorted(deleted_sample_paths):
+        try:
+            if sample_path.exists():
+                sample_path.unlink()
+        except OSError as exc:
+            raise RuntimeError(f"Failed to delete sample file: {sample_path}") from exc
+
+    activated_entry: dict | None = None
+    if remaining_entries:
+        active_indices = [i for i, entry in enumerate(remaining_entries) if entry.get("active")]
+        if active_removed or not active_indices:
+            for entry in remaining_entries:
+                entry["active"] = False
+            remaining_entries[0]["active"] = True
+            activated_entry = remaining_entries[0]
+        else:
+            activated_entry = remaining_entries[active_indices[0]]
+    _save_registry(remaining_entries)
+
+    if activated_entry is not None:
+        _sync_tts_env(
+            voice_id=activated_entry["qwen_tts_voice"],
+            sample_path=activated_entry["sample_path"],
+            target_model=activated_entry["target_model"],
+        )
+
+    return deleted_entries, activated_entry
 
 
 def list_voices() -> None:
@@ -273,15 +365,20 @@ def register_voice(sample_path: Path, voice_id: str, target_model: str, preferre
     entries.append(new_entry)
     _save_registry(entries)
 
-    _set_env_value("QWEN_TTS_VOICE", voice_id)
-    _set_env_value("QWEN_TTS_VOICE_SAMPLE", new_entry["sample_path"])
-    _set_env_value("VOICE_SAMPLE", new_entry["sample_path"])
+    _sync_tts_env(
+        voice_id=voice_id,
+        sample_path=new_entry["sample_path"],
+        target_model=target_model,
+    )
     return new_entry
 
 
-def record_create_and_activate(duration: int, sample_rate: int) -> None:
-    target_model = os.getenv("QWEN_TTS_MODEL", DEFAULT_TARGET_MODEL)
-    preferred_name = os.getenv("QWEN_TTS_PREFERRED_NAME", DEFAULT_PREFERRED_NAME)
+def record_create_and_activate(
+    duration: int,
+    sample_rate: int,
+    target_model: str,
+    preferred_name: str,
+) -> None:
     sample_path = _next_sample_path()
 
     record_sample(duration=duration, output=sample_path, sample_rate=sample_rate)
@@ -301,10 +398,15 @@ def record_create_and_activate(duration: int, sample_rate: int) -> None:
     print("Voice created and activated.")
     print(f"Sample : {entry['sample_path']}")
     print(f"Voice  : {entry['qwen_tts_voice']}")
+    print(f"Model  : {entry['target_model']}")
     print("Updated .env keys:")
+    print(f"  QWEN_TTS_MODEL={entry['target_model']}")
     print(f"  QWEN_TTS_VOICE={entry['qwen_tts_voice']}")
     print(f"  QWEN_TTS_VOICE_SAMPLE={entry['sample_path']}")
     print(f"  VOICE_SAMPLE={entry['sample_path']}")
+    if _is_realtime_vc_model(entry["target_model"]):
+        print(f"  QWEN_TTS_URL={os.getenv('QWEN_TTS_URL', DEFAULT_REALTIME_URL)}")
+        print(f"  QWEN_TTS_SESSION_MODE={os.getenv('QWEN_TTS_SESSION_MODE', 'commit')}")
     print()
 
 
@@ -314,7 +416,23 @@ def main() -> None:
     parser.add_argument("--rate", type=int, default=DEFAULT_SAMPLE_RATE, help="Recording sample rate in Hz.")
     parser.add_argument("--list", action="store_true", help="List saved voices.")
     parser.add_argument("--activate", type=int, help="Activate a saved voice by 1-based index.")
+    parser.add_argument(
+        "--delete",
+        type=int,
+        nargs="+",
+        help="Delete saved voices by 1-based index. Supports multiple indices, e.g. --delete 1 3 5.",
+    )
     parser.add_argument("--list-devices", action="store_true", help="List available microphones and exit.")
+    parser.add_argument(
+        "--target-model",
+        default=DEFAULT_TARGET_MODEL,
+        help=f"Target model used when creating the voice. Default: {DEFAULT_TARGET_MODEL}",
+    )
+    parser.add_argument(
+        "--preferred-name",
+        default=DEFAULT_PREFERRED_NAME,
+        help=f"Preferred voice name for Qwen voice enrollment. Default: {DEFAULT_PREFERRED_NAME}",
+    )
     args = parser.parse_args()
 
     if args.list_devices:
@@ -331,9 +449,34 @@ def main() -> None:
         print("Activated voice:")
         print(f"  Voice  : {chosen['qwen_tts_voice']}")
         print(f"  Sample : {chosen['sample_path']}")
+        print(f"  Model  : {chosen['target_model']}")
         return
 
-    record_create_and_activate(duration=args.duration, sample_rate=args.rate)
+    if args.delete is not None:
+        deleted_entries, activated_entry = delete_voices(args.delete)
+        print()
+        print("Deleted voices:")
+        for entry in deleted_entries:
+            print(f"  Voice  : {entry['qwen_tts_voice']}")
+            print(f"  Sample : {entry['sample_path']}")
+            print(f"  Model  : {entry['target_model']}")
+        if activated_entry is not None:
+            print()
+            print("Current active voice:")
+            print(f"  Voice  : {activated_entry['qwen_tts_voice']}")
+            print(f"  Sample : {activated_entry['sample_path']}")
+            print(f"  Model  : {activated_entry['target_model']}")
+        else:
+            print()
+            print("Voice registry is now empty.")
+        return
+
+    record_create_and_activate(
+        duration=args.duration,
+        sample_rate=args.rate,
+        target_model=args.target_model,
+        preferred_name=args.preferred_name,
+    )
 
 
 if __name__ == "__main__":
