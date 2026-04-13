@@ -116,6 +116,10 @@ python desktop\desktop_app.py
 - 再用 `pywebview` 把当前前端封装成桌面窗口
 - 用户看到的是独立应用窗口，不需要手动打开浏览器
 - 桌面版关闭时，会自动尝试停止由当前窗口启动的 pipeline
+- 桌面版启动时会先显示 splash 启动页
+- 本地服务 ready 后会自动切到正式主界面
+- 如果启动失败，错误会直接显示在 splash 页面里
+- 为了缩短“双击 exe 到 splash 出现”的等待，桌面包装层已改为先显示 splash，再延后加载 API 与模型相关模块
 
 ### 5. 打包为 Windows exe
 
@@ -148,7 +152,7 @@ desktop/assets/
 当前约定：
 
 - `app.ico`：Windows 桌面版图标
-- `splash.html`：桌面版启动页预留资源
+- `splash.html`：桌面版真实启动页资源
 
 ### 6. 打包后的目录约定
 

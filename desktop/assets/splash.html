@@ -7,12 +7,19 @@
     <style>
       :root {
         color-scheme: light;
-        --bg: #eff3ec;
-        --panel: rgba(255, 255, 255, 0.92);
-        --text: #1a241e;
-        --muted: #68746d;
-        --accent: #07c160;
-        --accent-soft: #dff7e9;
+        --bg-top: #f6fbf8;
+        --bg-bottom: #e8f5ef;
+        --panel: rgba(255, 255, 255, 0.84);
+        --panel-border: rgba(78, 167, 148, 0.16);
+        --text: #19342e;
+        --muted: #5f7f77;
+        --accent: #2cbc8c;
+        --accent-2: #49c5c7;
+        --accent-soft: rgba(73, 197, 199, 0.14);
+        --ring-track: rgba(44, 188, 140, 0.12);
+        --ok: #1b9b77;
+        --error: #d35e67;
+        --shadow: 0 28px 72px rgba(20, 57, 47, 0.14);
       }
 
       * {
@@ -22,94 +29,485 @@
       body {
         margin: 0;
         min-height: 100vh;
-        display: grid;
-        place-items: center;
+        overflow: hidden;
         background:
-          radial-gradient(circle at top left, rgba(7, 193, 96, 0.14), transparent 26%),
-          linear-gradient(180deg, #f4f7f1 0%, var(--bg) 100%);
+          radial-gradient(circle at 16% 18%, rgba(73, 197, 199, 0.18), transparent 24%),
+          radial-gradient(circle at 80% 14%, rgba(44, 188, 140, 0.12), transparent 22%),
+          radial-gradient(circle at 50% 100%, rgba(44, 188, 140, 0.14), transparent 36%),
+          linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
         font-family: "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
         color: var(--text);
       }
 
-      .card {
-        width: min(88vw, 420px);
-        padding: 28px 24px;
-        border-radius: 28px;
-        background: var(--panel);
-        box-shadow: 0 24px 60px rgba(24, 34, 28, 0.1);
-        text-align: center;
+      .noise,
+      .glow {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
       }
 
-      .logo {
-        width: 72px;
-        height: 72px;
-        margin: 0 auto 18px;
-        border-radius: 22px;
+      .noise {
+        opacity: 0.12;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.3) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.3) 1px, transparent 1px);
+        background-size: 22px 22px;
+        mask-image: radial-gradient(circle at center, rgba(0, 0, 0, 0.7), transparent 78%);
+      }
+
+      .glow::before,
+      .glow::after {
+        content: "";
+        position: absolute;
+        border-radius: 999px;
+        filter: blur(28px);
+      }
+
+      .glow::before {
+        width: 240px;
+        height: 240px;
+        top: -50px;
+        right: -60px;
+        background: rgba(73, 197, 199, 0.18);
+      }
+
+      .glow::after {
+        width: 280px;
+        height: 280px;
+        left: -80px;
+        bottom: -90px;
+        background: rgba(44, 188, 140, 0.14);
+      }
+
+      .shell {
+        position: relative;
+        min-height: 100vh;
         display: grid;
         place-items: center;
-        background: linear-gradient(135deg, var(--accent), #49d47e);
-        color: #fff;
-        font-size: 28px;
+        padding: 28px;
+      }
+
+      .card {
+        position: relative;
+        width: min(92vw, 470px);
+        padding: 32px 30px 26px;
+        border-radius: 30px;
+        background: var(--panel);
+        border: 1px solid var(--panel-border);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
+      }
+
+      .eyebrow {
+        margin: 0 0 18px;
+        font-size: 12px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: 132px minmax(0, 1fr);
+        align-items: center;
+        gap: 20px;
+      }
+
+      .orbital {
+        position: relative;
+        width: 132px;
+        height: 132px;
+        display: grid;
+        place-items: center;
+      }
+
+      .ring-track,
+      .ring-arc,
+      .orbit-dot {
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+      }
+
+      .ring-track {
+        border: 1px solid var(--ring-track);
+        transform: scale(0.94);
+      }
+
+      .ring-arc {
+        border: 4px solid transparent;
+        border-top-color: var(--accent);
+        border-right-color: rgba(73, 197, 199, 0.92);
+        animation: spin 2.4s linear infinite;
+      }
+
+      .ring-arc.secondary {
+        inset: 13px;
+        border-width: 3px;
+        border-top-color: rgba(25, 52, 46, 0.12);
+        border-right-color: rgba(44, 188, 140, 0.58);
+        animation-duration: 3.4s;
+        animation-direction: reverse;
+      }
+
+      .orbit-dot::before,
+      .orbit-dot::after {
+        content: "";
+        position: absolute;
+        border-radius: 999px;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      }
+
+      .orbit-dot::before {
+        width: 11px;
+        height: 11px;
+        top: 8px;
+        left: calc(50% - 5.5px);
+        box-shadow: 0 0 18px rgba(73, 197, 199, 0.45);
+      }
+
+      .orbit-dot::after {
+        width: 7px;
+        height: 7px;
+        right: 18px;
+        bottom: 18px;
+        opacity: 0.75;
+      }
+
+      .core {
+        position: relative;
+        width: 74px;
+        height: 74px;
+        border-radius: 24px;
+        display: grid;
+        place-items: center;
+        background:
+          linear-gradient(145deg, rgba(255, 255, 255, 0.92), rgba(228, 246, 240, 0.92));
+        border: 1px solid rgba(44, 188, 140, 0.14);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.8),
+          0 10px 28px rgba(24, 65, 55, 0.14);
+      }
+
+      .core::before {
+        content: "";
+        position: absolute;
+        inset: 10px;
+        border-radius: 18px;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        opacity: 0.14;
+      }
+
+      .core span {
+        position: relative;
+        font-size: 30px;
         font-weight: 700;
+        color: #1f6f5e;
       }
 
-      h1 {
+      .copy h1 {
         margin: 0;
-        font-size: 24px;
+        font-size: 28px;
+        line-height: 1.1;
       }
 
-      p {
+      .copy p {
         margin: 10px 0 0;
         color: var(--muted);
-        line-height: 1.75;
+        line-height: 1.72;
+        font-size: 14px;
       }
 
-      .loading {
+      .status-panel {
+        margin-top: 24px;
+        padding: 16px 18px;
+        border-radius: 22px;
+        background: rgba(246, 252, 249, 0.84);
+        border: 1px solid rgba(44, 188, 140, 0.12);
+      }
+
+      .status-top {
         display: flex;
-        justify-content: center;
-        gap: 8px;
-        margin-top: 20px;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
       }
 
-      .dot {
+      .status-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--muted);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .status-label::before {
+        content: "";
         width: 8px;
         height: 8px;
         border-radius: 50%;
         background: var(--accent);
-        animation: pulse 1.2s infinite ease-in-out;
+        box-shadow: 0 0 0 6px rgba(44, 188, 140, 0.12);
+        animation: pulse 1.8s infinite ease-in-out;
       }
 
-      .dot:nth-child(2) {
-        animation-delay: 0.15s;
+      .phase-badge {
+        padding: 7px 10px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: #216b61;
+        font-size: 12px;
+        font-weight: 600;
       }
 
-      .dot:nth-child(3) {
-        animation-delay: 0.3s;
+      .status-title {
+        margin: 14px 0 0;
+        font-size: 20px;
+        line-height: 1.35;
+      }
+
+      .status-detail {
+        margin: 8px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.75;
+        min-height: 3.5em;
+      }
+
+      .steps {
+        display: grid;
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .step {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .step-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: rgba(44, 188, 140, 0.16);
+        border: 1px solid rgba(44, 188, 140, 0.2);
+      }
+
+      .step.active {
+        color: var(--text);
+      }
+
+      .step.active .step-dot {
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        border-color: transparent;
+        box-shadow: 0 0 0 6px rgba(44, 188, 140, 0.08);
+      }
+
+      .step.done .step-dot {
+        background: var(--ok);
+        border-color: var(--ok);
+      }
+
+      .error-banner {
+        display: none;
+        margin-top: 16px;
+        padding: 14px 16px;
+        border-radius: 18px;
+        background: rgba(211, 94, 103, 0.08);
+        border: 1px solid rgba(211, 94, 103, 0.16);
+        color: #8e3540;
+        font-size: 13px;
+        line-height: 1.7;
+        white-space: pre-wrap;
+      }
+
+      body.error .error-banner {
+        display: block;
+      }
+
+      body.error .status-label::before {
+        background: var(--error);
+        box-shadow: 0 0 0 6px rgba(211, 94, 103, 0.12);
+        animation: none;
+      }
+
+      body.error .phase-badge {
+        background: rgba(211, 94, 103, 0.1);
+        color: #9f4752;
+      }
+
+      body.ready .phase-badge {
+        background: rgba(27, 155, 119, 0.12);
+        color: #1b7f63;
+      }
+
+      .footer {
+        margin-top: 18px;
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .footer strong {
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      @keyframes spin {
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
       }
 
       @keyframes pulse {
         0%,
         100% {
-          transform: scale(0.85);
-          opacity: 0.45;
+          transform: scale(0.95);
+          opacity: 0.7;
         }
         50% {
-          transform: scale(1.15);
+          transform: scale(1.08);
           opacity: 1;
+        }
+      }
+
+      @media (max-width: 560px) {
+        .card {
+          padding: 26px 22px 24px;
+        }
+
+        .hero {
+          grid-template-columns: 1fr;
+          justify-items: center;
+          text-align: center;
+        }
+
+        .footer {
+          flex-direction: column;
         }
       }
     </style>
   </head>
   <body>
-    <main class="card">
-      <div class="logo">声</div>
-      <h1>SpeechTranslator</h1>
-      <p>桌面版正在启动本地服务并加载前端界面。</p>
-      <div class="loading" aria-hidden="true">
-        <span class="dot"></span>
-        <span class="dot"></span>
-        <span class="dot"></span>
-      </div>
-    </main>
+    <div class="glow"></div>
+    <div class="noise"></div>
+    <div class="shell">
+      <main class="card">
+        <p class="eyebrow">Desktop Boot Sequence</p>
+
+        <section class="hero">
+          <div class="orbital" aria-hidden="true">
+            <div class="ring-track"></div>
+            <div class="ring-arc"></div>
+            <div class="ring-arc secondary"></div>
+            <div class="orbit-dot"></div>
+            <div class="core"><span>声</span></div>
+          </div>
+
+          <div class="copy">
+            <h1>SpeechTranslator</h1>
+            <p>
+              专业、轻量、面向实时语音翻译的桌面工作台。启动时先完成本地服务准备，再进入主界面。
+            </p>
+          </div>
+        </section>
+
+        <section class="status-panel">
+          <div class="status-top">
+            <div class="status-label">System Status</div>
+            <div class="phase-badge" id="phase-badge">BOOTING</div>
+          </div>
+
+          <h2 class="status-title" id="status-title">正在准备桌面环境</h2>
+          <p class="status-detail" id="status-detail">
+            正在初始化窗口、检查本地资源，并准备启动内置服务。
+          </p>
+
+          <div class="steps" id="step-list">
+            <div class="step active" data-step="bootstrap">
+              <span class="step-dot"></span>
+              <span>初始化桌面窗口</span>
+            </div>
+            <div class="step" data-step="server">
+              <span class="step-dot"></span>
+              <span>启动本地服务</span>
+            </div>
+            <div class="step" data-step="health">
+              <span class="step-dot"></span>
+              <span>检查接口健康状态</span>
+            </div>
+            <div class="step" data-step="ready">
+              <span class="step-dot"></span>
+              <span>切换到主界面</span>
+            </div>
+          </div>
+
+          <div class="error-banner" id="error-banner"></div>
+        </section>
+
+        <div class="footer">
+          <span><strong>Theme</strong> Fresh Green + Cyan</span>
+          <span><strong>Mode</strong> Desktop Wrapper</span>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const stepOrder = ["bootstrap", "server", "health", "ready"];
+
+      function updateSteps(activeStep, isError) {
+        document.querySelectorAll("[data-step]").forEach((node) => {
+          const step = node.getAttribute("data-step");
+          const activeIndex = stepOrder.indexOf(activeStep);
+          const stepIndex = stepOrder.indexOf(step);
+
+          node.classList.remove("active", "done");
+
+          if (isError) {
+            if (stepIndex < activeIndex) {
+              node.classList.add("done");
+            } else if (stepIndex === activeIndex) {
+              node.classList.add("active");
+            }
+            return;
+          }
+
+          if (stepIndex < activeIndex) {
+            node.classList.add("done");
+          } else if (stepIndex === activeIndex) {
+            node.classList.add("active");
+          }
+        });
+      }
+
+      window.updateSplashState = function updateSplashState(payload) {
+        const state = payload || {};
+        const step = state.step || "bootstrap";
+        const mode = state.mode || "booting";
+
+        document.body.classList.toggle("error", mode === "error");
+        document.body.classList.toggle("ready", mode === "ready");
+
+        document.getElementById("phase-badge").textContent = (state.badge || "BOOTING").toUpperCase();
+        document.getElementById("status-title").textContent = state.title || "正在准备桌面环境";
+        document.getElementById("status-detail").textContent =
+          state.detail || "正在初始化窗口、检查本地资源，并准备启动内置服务。";
+
+        const errorBanner = document.getElementById("error-banner");
+        errorBanner.textContent = state.error || "";
+
+        updateSteps(step, mode === "error");
+      };
+    </script>
   </body>
 </html>
