@@ -196,6 +196,17 @@ function getSpeakerSide(speakerId) {
   return side;
 }
 
+function formatSpeakerAvatar(speakerId) {
+  const normalized = String(speakerId || "").trim();
+  if (normalized.startsWith("speaker_")) {
+    return normalized.replace("speaker_", "S");
+  }
+  if (normalized.startsWith("guest_")) {
+    return normalized.replace("guest_", "G");
+  }
+  return normalized || "?";
+}
+
 function renderTurnFeedFromLogs(logs) {
   const turns = logs
     .map((line) => parseTurnLine(line))
@@ -218,7 +229,7 @@ function renderTurnFeedFromLogs(logs) {
 
   turns.forEach((turn) => {
     const side = getSpeakerSide(turn.speaker);
-    const avatarText = turn.speaker.replace("speaker_", "S");
+    const avatarText = formatSpeakerAvatar(turn.speaker);
 
     const row = document.createElement("article");
     row.className = `turn-row ${side}`;

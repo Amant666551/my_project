@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
@@ -8,6 +9,9 @@ SPEC_DIR = PROJECT_DIR / "desktop"
 WEB_DIR = PROJECT_DIR / "web"
 ASSETS_DIR = SPEC_DIR / "assets"
 ICON_FILE = ASSETS_DIR / "app.ico"
+BUILD_MODE = os.getenv("DESKTOP_BUILD_MODE", "onedir").strip().lower()
+if BUILD_MODE not in {"onedir", "onefile"}:
+    BUILD_MODE = "onedir"
 
 datas = []
 if WEB_DIR.exists():
@@ -47,24 +51,54 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name="SpeechTranslator",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=str(ICON_FILE) if ICON_FILE.exists() else None,
-)
+if BUILD_MODE == "onefile":
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name="SpeechTranslator",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=str(ICON_FILE) if ICON_FILE.exists() else None,
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="SpeechTranslator",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=True,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=str(ICON_FILE) if ICON_FILE.exists() else None,
+    )
+
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        name="SpeechTranslator",
+    )

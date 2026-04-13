@@ -19,7 +19,14 @@ def _candidate_runtime_dirs() -> list[Path]:
         return [Path(__file__).resolve().parent]
 
     exe_dir = Path(sys.executable).resolve().parent
-    candidates = [exe_dir, exe_dir.parent, bundle_dir(), bundle_dir().parent]
+    candidates = [
+        exe_dir,
+        exe_dir.parent,
+        exe_dir.parent.parent,
+        bundle_dir(),
+        bundle_dir().parent,
+        bundle_dir().parent.parent,
+    ]
     unique: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:

@@ -162,7 +162,9 @@ class SpeakerMatcher:
         self._registry: list[RegisteredSpeaker] = []
         self._sessions: list[SessionSpeaker] = []
         self._registry_sessions: dict[str, SessionSpeaker] = {}
-        self._speaker_counter = count(1)
+        self._known_speaker_counter = count(1)
+        self._guest_speaker_counter = count(1)
+        self._registry_speaker_ids: dict[str, str] = {}
         self._lock = threading.Lock()
         self._torchaudio = None
         self._soundfile = None
@@ -481,9 +483,19 @@ class SpeakerMatcher:
         second_score = ranked[1][1] if len(ranked) > 1 else 0.0
         return best_speaker, max(best_score, 0.0), second_speaker, max(second_score, 0.0)
 
+    def _allocate_speaker_id(self, matched_registry: RegisteredSpeaker | None) -> str:
+        if matched_registry is not None:
+            existing = self._registry_speaker_ids.get(matched_registry.label)
+            if existing is not None:
+                return existing
+            speaker_id = f"speaker_{next(self._known_speaker_counter)}"
+            self._registry_speaker_ids[matched_registry.label] = speaker_id
+            return speaker_id
+        return f"guest_{next(self._guest_speaker_counter)}"
+
     def _create_session(self, embedding: np.ndarray, matched_registry: RegisteredSpeaker | None = None) -> SessionSpeaker:
         session = SessionSpeaker(
-            speaker_id=f"speaker_{next(self._speaker_counter)}",
+            speaker_id=self._allocate_speaker_id(matched_registry),
             centroid=embedding.astype(np.float32),
             matched_registry=matched_registry,
         )
@@ -512,6 +524,7 @@ class SpeakerMatcher:
         if registry is None:
             return False
         previous = self._registry_sessions.get(registry.label)
+        session.speaker_id = self._allocate_speaker_id(registry)
         session.matched_registry = registry
         self._registry_sessions[registry.label] = session
         return previous is None or previous.speaker_id != session.speaker_id

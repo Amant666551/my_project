@@ -1,3 +1,8 @@
+param(
+    [ValidateSet("onedir", "onefile")]
+    [string]$Mode = "onedir"
+)
+
 $ErrorActionPreference = "Stop"
 
 $desktopDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -34,6 +39,7 @@ if (-not (Test-Path $sitePackages)) {
 }
 
 $env:PYTHONPATH = $sitePackages
+$env:DESKTOP_BUILD_MODE = $Mode
 
 & $pythonExe -c "import webview" 2>$null
 if ($LASTEXITCODE -ne 0) {
@@ -51,4 +57,10 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "Build complete."
-Write-Host "Output: $projectRoot\dist\SpeechTranslator.exe"
+if ($Mode -eq "onefile") {
+    Write-Host "Mode: onefile"
+    Write-Host "Output: $projectRoot\dist\SpeechTranslator.exe"
+} else {
+    Write-Host "Mode: onedir"
+    Write-Host "Output: $projectRoot\dist\SpeechTranslator\SpeechTranslator.exe"
+}

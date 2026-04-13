@@ -121,9 +121,9 @@ python desktop\desktop_app.py
 - 如果启动失败，错误会直接显示在 splash 页面里
 - 为了缩短“双击 exe 到 splash 出现”的等待，桌面包装层已改为先显示 splash，再延后加载 API 与模型相关模块
 
-### 5. 打包为 Windows exe
+### 5. 打包为 Windows 桌面程序
 
-推荐直接使用项目内脚本打包：
+推荐直接使用项目内脚本打包。默认会生成更适合日常使用的 `onedir` 版本：
 
 ```powershell
 .\desktop\build_desktop.ps1
@@ -135,9 +135,22 @@ python desktop\desktop_app.py
 - 自动定位基础 Python
 - 自动补 `pywebview`
 - 自动执行 `desktop\desktop_app.spec`
+- 默认使用 `onedir` 模式，启动速度通常比 `onefile` 更好
 - 比手动直接敲 `pyinstaller.exe` 更稳
 
 打包完成后，生成文件通常在：
+
+```text
+dist/SpeechTranslator/SpeechTranslator.exe
+```
+
+如果你确实需要单文件分发，也可以手动指定：
+
+```powershell
+.\desktop\build_desktop.ps1 -Mode onefile
+```
+
+这时输出通常在：
 
 ```text
 dist/SpeechTranslator.exe
@@ -156,7 +169,7 @@ desktop/assets/
 
 ### 6. 打包后的目录约定
 
-桌面版 exe 运行时会优先查找这些运行资源：
+桌面版程序运行时会优先查找这些运行资源：
 
 - `.env`
 - `models/`
@@ -170,14 +183,21 @@ files/
   models/
   voice_samples/
   dist/
-    SpeechTranslator.exe
+    SpeechTranslator/
+      SpeechTranslator.exe
 ```
 
 也就是说：
 
-- `SpeechTranslator.exe` 放在 `dist/` 里可以正常工作
+- 默认推荐使用 `dist/SpeechTranslator/SpeechTranslator.exe`
+- 这个 `onedir` 版本更适合作为你自己的日常桌面软件版本
 - 程序会自动向上一级查找 `.env`、`models`、`voice_samples`
 - `web/` 前端静态文件会被打包进 exe，不需要你手动复制
+
+如果你生成的是 `onefile`：
+
+- `dist/SpeechTranslator.exe` 也可以正常工作
+- 但由于项目依赖很重，`onefile` 启动通常会明显慢于 `onedir`
 
 ### 7. 打包版内部行为
 
