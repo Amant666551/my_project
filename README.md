@@ -457,6 +457,66 @@ turn | id=7 | speaker=speaker_2 | route=none | voice=default | top1=voice_004:0.
 - 但相似度还没有高到足以正式认定
 - 所以不会路由到注册 voice，而是走默认 voice
 
+### `unknown -> none` 的含义
+
+如果前端 `Conversation Feed` 里看到：
+
+```text
+speaker=unknown
+route=none
+top1=none:0.000
+top2=none:0.000
+```
+
+这通常不是“已经分错到别的说话人”，而是：
+
+- 当前这句文本已经出来了
+- 但对应的 speaker decision 没有成功落地
+- 所以前端只能显示 `unknown -> none`
+
+常见原因包括：
+
+- 句子太短，speaker embedding 不稳定
+- 本地切句后的音频太碎
+- Qwen 远端 final 与本地 VAD finalize 异步错位
+- speaker matcher 直接返回了 `None`
+
+当前代码已经补充了专门的诊断日志，用来区分这些情况。
+
+### Speaker 缺失诊断日志
+
+排查 `unknown -> none` 时，重点看这些日志关键字：
+
+- `speaker_missing`
+- `speaker_pending_missing`
+- `speaker_resolution_waiting`
+- `speaker_resolution_missing`
+
+含义如下：
+
+- `speaker_missing`
+  本地 ASR finalize 时，speaker matcher 没有返回结果
+- `speaker_pending_missing`
+  Qwen ASR 路径里，本地 finalize 已经发生，但这段音频没有匹配出 speaker
+- `speaker_resolution_waiting`
+  远端 transcript final 先到了，本地 speaker 还没 finalize，系统先等待
+- `speaker_resolution_missing`
+  文本 final 已经准备落地，但没有拿到对应的 speaker decision
+
+这些日志还会附带音频摘要，例如：
+
+- `audio_samples`
+- `audio_ms`
+- `audio_peak`
+- `audio_rms`
+
+这样可以进一步判断是：
+
+- 音频为空
+- 音频太短
+- 音量太小
+- 还是异步配对没对上
+
 ## 推荐看哪几种日志
 
 当前最有用的是这几类：
@@ -491,6 +551,13 @@ turn | id=3 | speaker=speaker_2 | route=voice_006 | voice=qwen-tts-vc-myvoice-..
 2. `MT result`
 3. `TURN`
 4. `TTS provider`
+
+如果是专门排查 speaker 问题，建议再额外看：
+
+1. `TURN`
+2. `speaker_turn`
+3. `speaker_route`
+4. `speaker_missing / speaker_pending_missing / speaker_resolution_*`
 
 ## 日志文件策略
 

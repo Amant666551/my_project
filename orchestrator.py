@@ -257,6 +257,23 @@ def _clip_text(text: str, limit: int = 72) -> str:
     return cleaned[: max(0, limit - 1)] + "..."
 
 
+def _audio_debug_summary(audio: np.ndarray | None) -> str:
+    if audio is None:
+        return "audio=none"
+    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if samples.size == 0:
+        return "audio=empty"
+    duration_ms = (samples.size / SAMPLE_RATE) * 1000.0
+    peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+    rms = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+    return "audio_samples=%s | audio_ms=%.1f | audio_peak=%.4f | audio_rms=%.4f" % (
+        samples.size,
+        duration_ms,
+        peak,
+        rms,
+    )
+
+
 def _log_turn_summary(event: _ASRTextEvent, translation: str) -> None:
     turn_log.info(
         "turn | id=%s | speaker=%s | route=%s | voice=%s | top1=%s:%.3f | top2=%s:%.3f | asr=%s | mt=%s",
@@ -956,6 +973,14 @@ class LocalStreamingASR:
             trace = self._active_trace or _new_trace()
             trace.asr_final_at = _now()
             speaker_decision = _speaker_matcher.match_utterance(decision.utterance_audio)
+            if speaker_decision is None:
+                asr_log.info(
+                    "speaker_missing | backend=local | trace=%s | should_reset=%s | final_present=%s | %s",
+                    trace.trace_id,
+                    decision.should_reset,
+                    bool(final),
+                    _audio_debug_summary(decision.utterance_audio),
+                )
             self._reset()
             if decision.should_reset:
                 return None
@@ -1140,9 +1165,16 @@ class QwenStreamingASR:
                 self._active_trace.asr_speech_end_at = _now()
             if not decision.should_reset:
                 self._pending_traces.append(self._active_trace)
-                self._pending_speakers.append(
-                    _speaker_matcher.match_utterance(decision.utterance_audio)
-                )
+                speaker_decision = _speaker_matcher.match_utterance(decision.utterance_audio)
+                if speaker_decision is None:
+                    asr_log.info(
+                        "speaker_pending_missing | backend=qwen | trace=%s | pending_traces=%s | deferred_finals=%s | %s",
+                        self._active_trace.trace_id,
+                        len(self._pending_traces),
+                        len(self._deferred_finals),
+                        _audio_debug_summary(decision.utterance_audio),
+                    )
+                self._pending_speakers.append(speaker_decision)
                 self._last_trace_candidate = self._active_trace
             self._active_trace = None
         current_trace = self._active_trace or (self._pending_traces[-1] if self._pending_traces else self._last_trace_candidate)
@@ -1170,19 +1202,48 @@ class QwenStreamingASR:
             if self._pending_traces:
                 trace = self._pending_traces.popleft()
                 speaker_decision = self._pending_speakers.popleft() if self._pending_speakers else None
+                if speaker_decision is None:
+                    asr_log.info(
+                        "speaker_resolution_missing | backend=qwen | reason=pending_trace_without_speaker | trace=%s | remaining_pending_traces=%s | remaining_pending_speakers=%s | deferred_finals=%s | final=%s",
+                        trace.trace_id,
+                        len(self._pending_traces),
+                        len(self._pending_speakers),
+                        len(self._deferred_finals),
+                        _clip_text(final),
+                    )
         elif self._active_trace is not None:
             # The remote final transcript arrived before local VAD finalized the utterance.
             # Hold it until we have the matching speaker decision.
+            asr_log.info(
+                "speaker_resolution_waiting | backend=qwen | reason=remote_final_before_local_finalize | active_trace=%s | deferred_finals=%s",
+                self._active_trace.trace_id,
+                len(self._deferred_finals),
+            )
             return None
         elif self._last_trace_candidate is not None:
             final = self._deferred_finals.popleft()
             trace = self._last_trace_candidate
             speaker_decision = None
+            asr_log.info(
+                "speaker_resolution_missing | backend=qwen | reason=trace_fallback_without_pending_speaker | trace=%s | pending_traces=%s | pending_speakers=%s | deferred_finals=%s | final=%s",
+                trace.trace_id,
+                len(self._pending_traces),
+                len(self._pending_speakers),
+                len(self._deferred_finals),
+                _clip_text(final),
+            )
         else:
             final = self._deferred_finals.popleft()
             trace = _new_trace()
             trace.asr_started_at = _now()
             speaker_decision = None
+            asr_log.info(
+                "speaker_resolution_missing | backend=qwen | reason=no_trace_candidate | pending_traces=%s | pending_speakers=%s | deferred_finals=%s | final=%s",
+                len(self._pending_traces),
+                len(self._pending_speakers),
+                len(self._deferred_finals),
+                _clip_text(final),
+            )
 
         if trace.asr_speech_end_at <= 0.0:
             trace.asr_speech_end_at = _now()
