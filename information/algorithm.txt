@@ -1,0 +1,459 @@
+麦克风-ASR-MT-TTS 技术算法总览
+
+一、总体链路
+
+当前项目的主链路是：
+
+麦克风输入 -> 前端音频预处理/切句 -> ASR -> 说话人匹配 -> MT -> TTS -> 串行播放
+
+其中，系统不是简单“识别-翻译-合成”直连，而是把音频前端、说话人路由、上下文翻译、排队播放都作为独立算法模块处理。
+
+二、麦克风端使用到的技术算法
+
+1. 音频采集
+
+- 通过 `sounddevice.InputStream` 从麦克风实时采集 16kHz 单声道音频。
+- 采用固定帧长 `FRAME_SIZE=512` 做流式输入。
+- 用队列缓冲音频块，避免采集线程与识别线程互相阻塞。
+
+作用
+
+- 保证低延迟连续输入。
+- 支持边说边识别，而不是整段录完再处理。
+
+2. 回声消除 AEC
+
+- 使用 `asr.aec.EchoCanceller` 对采集到的音频做回声消除。
+- 目标是降低扬声器外放和环境回灌对 ASR 的干扰。
+
+作用
+
+- 提升远场和桌面场景下的语音可懂度。
+- 减少播放 TTS 时对后续输入语音的污染。
+
+3. 高通滤波
+
+- 对音频做高通预处理，抑制低频噪声和直流漂移。
+- 代码里使用 `HPF_ALPHA` 做一阶高通递推。
+
+作用
+
+- 去掉低频轰鸣、风噪和直流偏置。
+- 让后续 VAD 和说话人特征更稳定。
+
+4. RNNoise 降噪
+
+- 使用 `pyrnnoise.RNNoise` 对语音帧做降噪。
+- 按 160 采样帧切块处理。
+
+作用
+
+- 压制背景噪声、键盘声、房间底噪。
+- 增强语音边界和后续 VAD 的鲁棒性。
+
+5. VAD 语音活动检测
+
+当前前端 VAD 不是单一模型，而是“模型 + 能量门控 + 平滑”的组合算法：
+
+- 优先使用 Silero VAD。
+- 如果模型不可用，则退化为基于 RMS 能量的启发式检测。
+- 对连续 VAD 概率做滑动平均平滑。
+- 再和能量阈值共同判定说话开始/结束。
+
+关键参数逻辑
+
+- `VAD_START_THRESHOLD`：判断是否开始说话。
+- `VAD_END_THRESHOLD`：判断是否仍在说话。
+- `MIN_SPEECH_START_FRAMES`：连续多帧满足条件才真正进入说话状态。
+- `MAX_SILENCE_FRAMES`：连续静音达到一定长度才切句。
+- `PRE_SPEECH_FRAMES`：保留开头预录帧，避免丢掉起始音节。
+- 自适应噪声底 `noise_floor` 会动态调整能量门限。
+
+作用
+
+- 解决实时场景里“什么时候开始说、什么时候结束”的问题。
+- 既减少误切句，也减少长时间拖尾。
+
+6. 动态能量阈值
+
+- 根据静音时段的 RMS 自动估计噪声底。
+- 使用 `ADAPTIVE_ENERGY_*` 参数动态生成 start/continue 阈值。
+
+作用
+
+- 在环境安静和嘈杂时都能保持较合理的切句灵敏度。
+- 比固定阈值更适合实时麦克风输入。
+
+三、ASR 环节使用到的技术算法
+
+1. 流式 ASR
+
+项目支持两种 ASR 路线：
+
+- Qwen Realtime ASR：默认主路线。
+- 本地 sherpa-onnx zipformer：fallback 路线。
+
+本质都是流式语音识别：
+
+- 音频边输入，边出 partial。
+- 句子结束后再出 final。
+
+2. Qwen Realtime ASR
+
+- 通过 websocket 和 DashScope Realtime 服务交互。
+- 音频转为 16-bit PCM 后做 base64 编码上传。
+- 从 `response.audio_transcript.delta` 读取 partial。
+- 从 `conversation.item.input_audio_transcription.completed` 读取 final。
+
+作用
+
+- 低延迟在线识别。
+- 适合实时对话翻译场景。
+
+3. 本地 sherpa-onnx zipformer ASR
+
+- 使用 `sherpa_onnx.OnlineRecognizer`。
+- 采用 transducer/greedy_search 解码。
+- 依靠本地模型做流式识别。
+
+作用
+
+- 网络异常时可本地兜底。
+- 让系统具备离线可运行性。
+
+4. Partial 累积与 final 对齐
+
+- 系统会维护 partial 文本和 final 文本。
+- partial 只做展示和时延观察。
+- final 才进入翻译与 TTS。
+
+作用
+
+- 提供“边说边出字”的交互体验。
+- 让最终输出尽量以稳定结果为准。
+
+5. 热词后处理
+
+- 使用 `HotwordManager` 对 ASR final 做热词替换。
+- 将别名词、口语写法统一为规范词。
+
+作用
+
+- 提升领域词、专有名词的识别一致性。
+- 降低后续 MT 因识别偏差造成的翻译错误。
+
+6. ASR 观测与时延统计
+
+- 统计 first partial、final tail、总时延等指标。
+- 记录 partial 数、重连次数、ASR 错误数。
+
+作用
+
+- 便于定位识别瓶颈。
+- 方便后续做论文评测和性能优化。
+
+四、说话人识别与路由算法
+
+这一部分是本项目的核心特色之一，不只是识别“谁在说话”，而是识别后决定“用哪个 TTS voice 来回译”。
+
+1. Speaker Embedding 提取
+
+- 使用 SpeechBrain `ECAPA` 说话人模型。
+- 对切好的 utterance 音频提取 embedding。
+- embedding 做 L2 归一化。
+
+作用
+
+- 把一段语音映射到高维说话人特征空间。
+- 为聚类和检索提供向量表示。
+
+2. 会话内聚类
+
+- 每个新 utterance 先和当前会话已有 speaker centroid 比较。
+- 用余弦相似度判断是否归入已有 speaker。
+- `cluster_threshold` 控制是否创建新 speaker。
+- 如果相似度差距太小，也会强制新建会话 speaker，避免误合并。
+
+作用
+
+- 在单次对话内区分不同发言者。
+- 解决“当前这句话属于哪个会话 speaker”的问题。
+
+3. 注册库匹配
+
+- 将当前 utterance embedding 与本地 `voice_registry.json` 中的注册声音做匹配。
+- 每个注册 voice 既有整体 centroid，也有多个 prototype。
+- 匹配分数综合 centroid 与 prototype 相似度。
+
+作用
+
+- 把“会话 speaker”映射到“真实注册 voice”。
+- 实现 speaker -> TTS voice 的动态路由。
+
+4. 阈值 + margin 共同判定
+
+系统不是只看最大相似度，而是同时看：
+
+- `registry_threshold`：top1 必须足够高。
+- `registry_margin_threshold`：top1 必须明显高于 top2。
+
+作用
+
+- 防止两个声音很像时误路由。
+- 降低错误切到别的 voice 的概率。
+
+5. 原型窗口 prototypes
+
+- 对注册样本按多个窗口切片，提取多个 prototype embedding。
+- 匹配时综合多个局部原型得分。
+
+作用
+
+- 提升长样本或局部发音变化下的鲁棒性。
+- 比只用单个全局向量更稳。
+
+6. 已绑定 voice 的复用机制
+
+- 同一个注册 voice 一旦绑定到某个 session speaker，会尽量复用。
+- 系统会维护 registry label 到 speaker_id 的映射。
+
+作用
+
+- 保持同一说话人在多轮里路由稳定。
+- 避免来回抖动到不同的 speaker_id。
+
+7. Guest / Unknown 兜底
+
+- 如果没有满足注册库阈值，就生成 `guest_x` 或返回 `unknown` 路由。
+- 这时 TTS 走默认 voice。
+
+作用
+
+- 保证系统不会因匹配失败而中断。
+- 方便后续扩展新的说话人注册。
+
+五、MT 环节使用到的技术算法
+
+1. 翻译主模型
+
+- 默认使用 DeepSeek Chat API。
+- 翻译请求由系统统一调用。
+- 翻译结果要求只返回译文，不输出解释。
+
+作用
+
+- 提供核心跨语言转换能力。
+- 作为实时链路中语言理解和转换的中心。
+
+2. 本地翻译 fallback
+
+- 可通过本地翻译服务接口调用。
+- 本地服务再连接轻量翻译模型。
+
+作用
+
+- 在 API 受限或需要本地实验时备用。
+- 方便做可控实验和离线测试。
+
+3. 场景分析 Scene Analyzer
+
+- 在翻译前先用 DeepSeek 做一句话场景判别。
+- 输出结构化 JSON：scene、utterance_type、entity_focus、register、translation_hint、confidence。
+- 场景结果做缓存，避免每句都重新分析。
+
+作用
+
+- 提供上下文感知翻译提示。
+- 让翻译在“校园/技术/日常/文学”等不同语境下更稳。
+
+4. 翻译上下文记忆
+
+- `MTPromptContext` 维护最近若干轮中英对。
+- 翻译 prompt 会拼接最近上下文和场景信息。
+
+作用
+
+- 让术语、代词、上下文保持一致。
+- 降低多轮翻译前后不统一的问题。
+
+5. 句子级翻译策略
+
+- final 才进入翻译。
+- 如果输入本来就是目标语言，则保持不变。
+- 如果是片段，也尽量只翻片段。
+
+作用
+
+- 更贴近实时对话场景。
+- 允许用户说半句、短语、插话。
+
+六、TTS 环节使用到的技术算法
+
+1. Qwen Realtime VC TTS
+
+- 使用 Qwen 实时语音合成接口。
+- 每句单独建立 session，使用 `commit` 模式。
+- 可以按句传入 `voice`，实现动态 voice 路由。
+
+作用
+
+- 把翻译文本即时合成为目标声音。
+- 让系统支持“谁说话就尽量像谁”的风格迁移。
+
+2. 语音角色路由
+
+- 根据说话人匹配结果选择对应 `voice_id`。
+- 如果匹配失败，则走默认 voice。
+
+作用
+
+- 把 speaker recognition 的结果直接作用到 TTS。
+- 实现跨语言场景下的说话人保持。
+
+3. 串行播放队列
+
+- TTS 事件进入队列，单 worker 串行处理。
+- 避免多个句子同时播放互相打断。
+
+作用
+
+- 保证播放顺序与对话顺序一致。
+- 提升用户听感和对话连贯性。
+
+4. 首包时延统计
+
+- 记录 TTS 发起到首个可播放音频就绪的时间。
+- 统计 end-to-end latency。
+
+作用
+
+- 衡量整条链路的实时体验。
+- 为后续优化提供关键指标。
+
+七、整条链路的调度与系统算法
+
+1. 生产者-消费者队列
+
+系统分成三个 worker：
+
+- ASR worker
+- MT worker
+- TTS worker
+
+它们通过队列串联。
+
+作用
+
+- 解耦各阶段耗时。
+- 防止某个阶段阻塞整个链路。
+
+2. Latest-item 丢弃策略
+
+- 队列满时不是无限堆积，而是丢弃最旧项，保留最新输入。
+
+作用
+
+- 保证实时系统优先响应最新语音。
+- 避免延迟越来越大。
+
+3. Trace 统一追踪
+
+- 每个 utterance 都有 trace_id。
+- 记录 ASR、MT、TTS 各阶段耗时。
+- 统一输出 TURN 汇总日志。
+
+作用
+
+- 方便定位问题和做实验统计。
+- 让一整句的处理过程可观测。
+
+4. 评测导出
+
+- 可以把每个 turn 的预测结果导出为 JSONL。
+- 用于后续自动评测 route accuracy、latency、translation quality 等。
+
+作用
+
+- 方便做论文实验和回归测试。
+- 让系统输出可复用、可评分。
+
+八、当前项目已经采用的核心算法组合
+
+如果按“最关键的算法栈”来概括，当前系统主要是以下组合：
+
+- 音频前端：AEC + 高通滤波 + RNNoise + 自适应 VAD
+- ASR：Qwen Realtime ASR / sherpa-onnx streaming zipformer
+- 说话人：SpeechBrain ECAPA embedding + 会话聚类 + 注册库检索 + 阈值/margin 判定
+- MT：DeepSeek Chat + 场景分析 + 上下文记忆
+- TTS：Qwen Realtime VC TTS + speaker voice 路由 + 串行队列播放
+
+九、未来改动的方向
+重点改 Speaker Matching，而不是先动 ASR/MT/TTS 主干
+按照 `plan.txt` 的推进顺序，真正的论文方法应当落在 speaker 决策层，也就是从 `B2_current_system` 走向 `B3_proposed_method`。
+
+建议改动点
+
+- 在当前 speaker matcher 基础上引入显式在线身份状态。
+- 增加 `matched / pending / unknown` 三态机制。
+- 对低置信度 utterance 做延迟确认，不立刻做最终路由。
+- 给已经稳定绑定的 session 引入切换惩罚，降低 route 抖动。
+- 累积相邻若干 turn 的证据，而不是每句都孤立决策。
+- 结合 utterance 长度、上一轮时间间隔、文本连续性等辅助特征。
+
+预期收益
+
+- 降低 false switch。
+- 降低 unknown rate。
+- 提高同一 speaker 的 route consistency。
+- 更贴合论文中“身份保持与目标音色路由一致性”的核心问题。
+
+3. 做一个“简化版 B3”，先只实现最关键的机制
+按照 `plan.txt`，第一版 `B3` 应该尽量简洁、可解释、可落地。
+
+建议改动点
+
+- 先只做三件事：`pending` 三态、低置信度延迟确认、route 切换惩罚。
+- 先不要把文本特征、复杂时序特征全部一次性加满。
+- 保持 `B2_current_system` 和 `B3_proposed_method` 可以通过配置开关切换。
+- 保持现有日志和导出格式不变，便于直接做对比实验。
+
+预期收益
+
+- 第一版 B3 更容易实现。
+- 实验结论更清晰，便于解释。
+- 如果这三项已经有效，就足以支撑论文主线。
+
+4. 围绕论文指标做改动，而不是围绕工程直觉做改动
+
+后续优化的方向应该由指标驱动，重点看 `route_accuracy`、`unknown_rate`、`speaker_consistency`、`false_switch_rate`、`end_to_end_latency_ms`。
+
+建议改动点
+
+- 如果 `false_switch_rate` 高，优先增强切换惩罚和证据累积。
+- 如果 `unknown_rate` 高，优先优化 pending 到 matched 的确认逻辑。
+- 如果 `speaker_consistency` 低，优先增强 session centroid 稳定性和历史绑定复用。
+- 如果 `latency` 上升过快，优先简化决策层特征，避免引入过重的在线推理。
+
+预期收益
+
+- 所有改动都能直接解释到论文指标上。
+- 避免做“看起来更复杂，但实验上不一定更好”的改动。
+- 让方法设计和评测目标保持一致。
+
+5. 如果继续扩展，优先考虑和论文任务直接相关的辅助特征
+
+这些扩展不是为了“更强的通用系统”，而是为了支撑闭集多说话人路由稳定性。
+
+建议改动点
+
+- 增加文本连续性辅助判断。
+- 增加 turn 间隔和句长先验。
+- 增加对高相似音色的更细粒度区分策略。
+- 在注册 voice 原型上增加更稳的 prototype bank 结构。
+- 对 short utterance 做更谨慎的路由确认。
+
+预期收益
+
+- 对短句和频繁切换场景更稳。
+- 对相似声音更不容易误路由。
+- 更容易在论文里形成“消融后收益”分析。

@@ -1,0 +1,179 @@
+计划草案
+
+一、目标
+在当前级联系统基础上，把论文点落到：
+- 实时说话人区分
+- 闭集条件下的实时多说话人语音翻译
+- 预置音色路由一致性
+更准确地说，论文核心问题应表述为：
+在闭集条件下，如何在实时多说话人语音翻译系统中稳定保持说话人身份，并维持目标音色路由的一致性，同时控制时延和错误切换。
+
+二、推进顺序
+阶段 1：文献综述
+目标：
+- 先把问题定义站稳
+- 先确认相关工作已经做到哪里
+- 先明确你和现有工作的差异
+要做的事：
+1. 先读第一批核心论文
+   - STAC-ST / speaker-turn aware conversational ST
+   - Preset-Voice Matching
+   - StreamSpeech
+   - DNCASR
+   - speaker-related diarization 语义辅助论文
+2. 每篇记录以下内容
+   - 任务是不是多说话人
+   - 是不是实时
+   - 有没有处理 speaker identity
+   - 有没有处理 target voice / voice preservation
+   - 有没有 latency 指标
+   - 这些工作和你的差异在哪里
+3. 最终整理出一个 related work 框架
+   - multi-speaker / conversational ST
+   - streaming / simultaneous S2ST
+   - speaker preservation / preset voice matching / diarization
+
+阶段 2：问题和 baseline 固定
+目标：
+- 先把论文的实验支架定住
+- 避免后面边写代码边改问题定义
+要做的事：
+1. 固定任务定义
+   - 闭集条件下的实时多说话人语音翻译与预置音色路由任务
+2. 固定 baseline
+   - B0_no_routing
+   - B1_registry_only
+   - B2_current_system
+   - B3_proposed_method
+3. 固定评测格式
+   - refs 使用 eval/reference_set_4spk_v1.jsonl 或后续扩展版
+   - preds 使用 EVAL_PREDICTIONS_PATH 导出
+   - 指标用 eval/score_eval.py
+4. 明确主指标
+   - route_accuracy
+   - unknown_rate
+   - speaker_consistency
+   - false_switch_rate
+   - switch_precision / recall / f1
+   - end_to_end_latency_ms_mean / p95
+   - translation_bleu
+
+
+阶段 3：先跑通 B2_current_system
+目标：
+- 先得到当前系统的基线分数
+- 后面所有改进都和它比
+要做的事：
+1. 打开 EVAL_PREDICTIONS_PATH
+2. 用四人录制执行版完成第一轮录制
+3. 生成 preds 文件
+4. 补齐 refs 文件
+5. 跑 score_eval.py
+6. 记录 B2_current_system 的首轮结果
+这一阶段不要急着改方法。先知道当前系统到底在哪里失分：
+- 是 unknown 太高
+- 是 false switch 太高
+- 还是同一 speaker 的 route 漂移太多
+
+阶段 4：实现 B3_proposed_method
+目标：
+- 在当前 speaker 匹配模块基础上增加在线身份稳定机制
+- 不动大框架，只增强 speaker 决策层
+核心思想：
+不要把每个 utterance 都当成可以立即做最终决策的对象，而是维护一个在线的身份状态和路由惯性机制。
+拟采用的模块：
+1. 三态 speaker 状态
+   - matched
+   - pending
+   - unknown
+2. 低置信度延迟确认
+   - 对短句、低 margin、低 registry_score 的句子先不立刻最终路由
+   - 将其放入 pending 状态
+   - 等待后续 1 到 2 个 turn 的补充证据
+3. 已绑定 session 的切换惩罚
+   - 如果一个 session 已经稳定绑定到某个 route
+   - 除非新候选证据显著更强，否则不轻易切走
+4. 相邻 turn 的证据累积
+   - 不只看当前 utterance
+   - 结合最近几句的 speaker 候选趋势做决策
+5. 文本和时序辅助
+   - utterance 长度
+   - 与上一轮的间隔
+   - 文本连续性
+   - 说话人切换先验
+
+阶段 5：先做一个“简化版 B3”
+建议不要一次把所有模块都写满。第一版建议只做：
+1. pending 三态
+2. 低置信度延迟确认
+3. route 切换惩罚
+先不做复杂文本特征。
+原因：
+- 这样最容易落地
+- 代码风险低
+- 实验上更容易解释
+- 如果这一版已经能显著改善 unknown_rate 和 false_switch_rate，就足够形成论文主线
+
+阶段 6：跑对比实验
+目标：
+- 拿同一批 refs / preds，比较 B2 和 B3
+重点看：
+1. consistency 提升多少
+2. false switch 降低多少
+3. unknown_rate 是否下降
+4. latency 是否显著上升
+5. 改进是不是主要集中在短句和快速切换场景
+
+阶段 7：做消融
+等 B3 第一版有效后，再拆开做消融。
+建议消融顺序：
+1. 去掉 pending
+2. 去掉切换惩罚
+3. 去掉证据累积
+4. 再单独加入文本/时序特征
+这样可以回答：
+- 到底是哪一个模块带来了主要收益
+- 哪些模块收益大、成本低
+- 哪些模块值得保留进最终论文
+
+
+三、代码实现建议
+代码上建议按“最小侵入原则”推进。
+优先改：
+- asr/speaker_matcher.py
+- orchestrator.py
+尽量不要动：
+- ASR 主干
+- MT 主干
+- TTS 主干
+推荐做法：
+1. 在 speaker matcher 中显式引入状态
+2. 在 orchestrator 中保留已有日志和导出格式
+3. 对新增状态增加结构化日志
+4. 保持 B2_current_system 可切换回退
+
+建议新增配置开关，例如：
+- SPEAKER_PENDING_ENABLED
+- SPEAKER_PENDING_MAX_TURNS
+- SPEAKER_ROUTE_SWITCH_PENALTY
+- SPEAKER_TEXT_PRIOR_ENABLED
+这样做的好处是：
+- B2 和 B3 可以共存
+- 方便做 baseline 和消融
+- 不会把当前系统直接改死
+
+四、论文写作建议
+写论文时，务必把当前系统和方法贡献区分开：
+- B2_current_system 是当前已跑通系统
+- B3_proposed_method 是本文提出的方法
+不要写成“本文提出了一种新的实时语音翻译系统”
+更合理的写法是“本文在一个可部署的实时级联系统上，提出了一种面向多说话人场景的在线身份保持与目标音色路由一致性机制。”
+
+五、近期最优执行顺序
+从现在开始，最合理的动作顺序是：
+1. 你先读核心论文并做笔记
+2. 你用四人录制执行版收第一批数据
+3. 我们先跑出 B2_current_system 分数
+4. 再由我开始改 speaker 区分与在线稳定机制
+5. 跑 B3_proposed_method
+6. 对比结果并决定下一轮调参方向

@@ -62,32 +62,14 @@ def _log_rotate_minutes() -> int:
     return max(0, _env_int("LOG_ROTATE_MINUTES", 0))
 
 
-def _console_mode() -> str:
-    value = os.getenv("LOG_CONSOLE_MODE", "minimal").strip().lower()
-    return _normalize_mode(value, default="minimal")
-
-
-def _file_mode() -> str:
-    value = os.getenv("LOG_FILE_MODE", "minimal").strip().lower()
-    return _normalize_mode(value, default="minimal")
-
-
-def _normalize_mode(value: str, *, default: str) -> str:
-    aliases = {
-        "quiet": "minimal",
-        "concise": "minimal",
-        "standard": "normal",
-        "default": "normal",
-        "full": "verbose",
-    }
-    normalized = aliases.get(value, value)
-    if normalized not in {"minimal", "normal", "verbose"}:
-        return default
-    return normalized
-
-
 def _is_core_result_record(record: logging.LogRecord, message: str) -> bool:
-    if record.name == f"{_APP_LOGGER_PREFIX}.ASR" and message.startswith("final | text="):
+    if record.name == f"{_APP_LOGGER_PREFIX}.ASR" and (
+        message.startswith("final | text=")
+        or message.startswith("trace_create |")
+        or message.startswith("final_enqueue |")
+        or message.startswith("final_match |")
+        or message.startswith("final_commit |")
+    ):
         return True
     if record.name == f"{_APP_LOGGER_PREFIX}.MT" and message.startswith("result | text="):
         return True
@@ -95,81 +77,33 @@ def _is_core_result_record(record: logging.LogRecord, message: str) -> bool:
         return True
     if record.name == f"{_APP_LOGGER_PREFIX}.TTS" and message.startswith("TTS provider |"):
         return True
-    if record.name == f"{_APP_LOGGER_PREFIX}.PIPELINE" and message == "System ready - start speaking!":
-        return True
-    return False
-
-
-def _is_pipeline_lifecycle_record(record: logging.LogRecord, message: str) -> bool:
-    return record.name == f"{_APP_LOGGER_PREFIX}.PIPELINE" and message in {
+    if record.name == f"{_APP_LOGGER_PREFIX}.PIPELINE" and message in {
         "ASR -> MT -> TTS pipeline starting",
         "System ready - start speaking!",
         "Pipeline stopped.",
-    }
-
-
-def _is_mt_context_record(record: logging.LogRecord, message: str) -> bool:
-    return record.name == f"{_APP_LOGGER_PREFIX}.MT.CONTEXT" and (
-        message.startswith("deepseek_call |")
-        or message.startswith("deepseek_done |")
-        or message.startswith("scene_result |")
-        or message.startswith("scene_analyzer |")
-    )
+    }:
+        return True
+    return False
 
 
 def _is_latency_record(record: logging.LogRecord, message: str) -> bool:
     return record.name == f"{_APP_LOGGER_PREFIX}.LATENCY" and message.startswith("trace |")
 
 
-def _is_asr_partial_record(record: logging.LogRecord, message: str) -> bool:
-    return record.name == f"{_APP_LOGGER_PREFIX}.ASR" and message.startswith("partial | text=")
-
-
-class _MinimalConsoleFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        return _is_core_result_record(record, message)
-
-
-class _NormalConsoleFilter(logging.Filter):
+class _UnifiedConsoleFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.levelno >= logging.WARNING:
             return True
         message = record.getMessage()
-        return _is_core_result_record(record, message) or _is_pipeline_lifecycle_record(record, message)
+        return _is_core_result_record(record, message) or _is_latency_record(record, message)
 
 
-class _MinimalFileFilter(logging.Filter):
+class _UnifiedFileFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.levelno >= logging.WARNING:
             return True
-
         message = record.getMessage()
-        if _is_core_result_record(record, message):
-            return True
-        if _is_latency_record(record, message):
-            return True
-        return False
-
-
-class _NormalFileFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        if record.levelno >= logging.WARNING:
-            return True
-
-        message = record.getMessage()
-        if _is_core_result_record(record, message):
-            return True
-        if _is_pipeline_lifecycle_record(record, message):
-            return True
-        if _is_mt_context_record(record, message):
-            return True
-        if _is_latency_record(record, message):
-            return True
-        if _is_asr_partial_record(record, message):
-            return True
-
-        return False
+        return _is_core_result_record(record, message) or _is_latency_record(record, message)
 
 
 class _MinimalConsoleFormatter(logging.Formatter):
@@ -298,15 +232,8 @@ def configure_logging() -> None:
     if _env_bool("LOG_CONSOLE_ENABLED", True):
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.terminator = "\r\n"
-        console_mode = _console_mode()
-        if console_mode == "minimal":
-            console_handler.addFilter(_MinimalConsoleFilter())
-            console_handler.setFormatter(_MinimalConsoleFormatter(datefmt="%H:%M:%S"))
-        elif console_mode == "normal":
-            console_handler.addFilter(_NormalConsoleFilter())
-            console_handler.setFormatter(formatter)
-        else:
-            console_handler.setFormatter(formatter)
+        console_handler.addFilter(_UnifiedConsoleFilter())
+        console_handler.setFormatter(_MinimalConsoleFormatter(datefmt="%H:%M:%S"))
         console_handler.setLevel(_log_level("LOG_CONSOLE_LEVEL", _log_level("LOG_LEVEL", logging.INFO)))
         setattr(console_handler, _HANDLER_TAG, True)
         _CONSOLE_HANDLER = console_handler
@@ -329,16 +256,11 @@ def configure_logging() -> None:
                 backupCount=max(1, _env_int("LOG_BACKUP_COUNT", 3)),
                 encoding="utf-8",
             )
+        file_handler.addFilter(_UnifiedFileFilter())
         file_handler.setFormatter(formatter)
-        file_mode = _file_mode()
-        if file_mode == "minimal":
-            file_handler.addFilter(_MinimalFileFilter())
-        elif file_mode == "normal":
-            file_handler.addFilter(_NormalFileFilter())
         file_handler.setLevel(_log_level("LOG_FILE_LEVEL", _log_level("LOG_LEVEL", logging.INFO)))
         setattr(file_handler, _HANDLER_TAG, True)
         _FILE_HANDLER = file_handler
-
     _CONFIGURED = True
 
 

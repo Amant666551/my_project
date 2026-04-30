@@ -19,7 +19,9 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from itertools import count
+from pathlib import Path
 
 import numpy as np
 import requests
@@ -109,6 +111,8 @@ AUDIO_INPUT_LATENCY = os.getenv("ASR_INPUT_LATENCY", "high")
 AUDIO_QUEUE_MAX_CHUNKS = int(os.getenv("ASR_AUDIO_QUEUE_MAX_CHUNKS", "64"))
 ASR_RESULT_QUEUE_MAX = int(os.getenv("ASR_RESULT_QUEUE_MAX", "16"))
 TTS_QUEUE_MAX = int(os.getenv("TTS_QUEUE_MAX", "16"))
+ASR_FINAL_ALIGNMENT_WAIT_MS = int(os.getenv("ASR_FINAL_ALIGNMENT_WAIT_MS", "120"))
+ASR_FINAL_ALIGNMENT_MAX_DEFERRED = int(os.getenv("ASR_FINAL_ALIGNMENT_MAX_DEFERRED", "8"))
 
 MT_URL = os.getenv("MT_URL", "http://127.0.0.1:8000/translate")
 MT_SOURCE_LANG = os.getenv("MT_SOURCE_LANG", "zh")
@@ -197,6 +201,7 @@ class _PipelineTrace:
     mt_scene_cache_hit: bool = False
     mt_translate_started_at: float = 0.0
     mt_translate_done_at: float = 0.0
+    tts_queue_entered_at: float = 0.0
     tts_started_at: float = 0.0
     tts_ready_at: float = 0.0
     tts_done_at: float = 0.0
@@ -224,8 +229,17 @@ class _TTSEvent:
     text: str
     lang: str
     trace: _PipelineTrace
+    source_text: str | None = None
     speaker_id: str | None = None
     voice_id: str | None = None
+    route_label: str | None = None
+    top1_label: str | None = None
+    top1_score: float = 0.0
+    top2_label: str | None = None
+    top2_score: float = 0.0
+    session_score: float = 0.0
+    registry_score: float = 0.0
+    registry_margin: float = 0.0
 
 
 def _new_trace() -> _PipelineTrace:
@@ -233,18 +247,38 @@ def _new_trace() -> _PipelineTrace:
 
 
 def _log_trace_latency(trace: _PipelineTrace) -> None:
+    asr_latency_ms = _elapsed_ms(trace.asr_started_at, trace.asr_speech_end_at or trace.asr_final_at)
+    asr_first_partial_ms = _elapsed_ms(trace.asr_started_at, trace.asr_first_partial_at)
+    asr_final_tail_ms = _elapsed_ms(trace.asr_speech_end_at, trace.asr_final_at)
+    mt_scene_latency_ms = _elapsed_ms(trace.mt_scene_started_at, trace.mt_scene_done_at)
+    asr_to_mt_gap_ms = _elapsed_ms(trace.asr_final_at, trace.mt_translate_started_at)
+    mt_latency_ms = _elapsed_ms(trace.mt_translate_started_at, trace.mt_translate_done_at)
+    tts_queue_wait_ms = _elapsed_ms(trace.tts_queue_entered_at, trace.tts_started_at)
+    tts_latency_ms = _elapsed_ms(trace.tts_started_at, trace.tts_ready_at)
+    tts_done_latency_ms = _elapsed_ms(trace.tts_started_at, trace.tts_done_at)
+    end_to_end_latency_ms = _elapsed_ms(trace.asr_started_at, trace.tts_ready_at)
+    end_to_end_net_latency_ms = max(0.0, end_to_end_latency_ms - tts_queue_wait_ms)
+    end_to_end_done_latency_ms = _elapsed_ms(trace.asr_started_at, trace.tts_done_at)
+
     latency_log.info(
         "trace | id=%s | asr_latency_ms=%.1f | asr_first_partial_ms=%.1f | asr_final_tail_ms=%.1f | "
-        "mt_scene_analyzer_latency_ms=%.1f | mt_translator_latency_ms=%.1f | tts_latency_ms=%.1f | "
-        "end_to_end_latency_ms=%.1f | scene_cache_hit=%s | partials=%s",
+        "mt_scene_analyzer_latency_ms=%.1f | asr_to_mt_gap_ms=%.1f | mt_translator_latency_ms=%.1f | "
+        "tts_queue_wait_ms=%.1f | tts_latency_ms=%.1f | tts_done_latency_ms=%.1f | "
+        "end_to_end_latency_ms=%.1f | end_to_end_net_latency_ms=%.1f | end_to_end_done_latency_ms=%.1f | "
+        "scene_cache_hit=%s | partials=%s",
         trace.trace_id,
-        _elapsed_ms(trace.asr_started_at, trace.asr_speech_end_at or trace.asr_final_at),
-        _elapsed_ms(trace.asr_started_at, trace.asr_first_partial_at),
-        _elapsed_ms(trace.asr_speech_end_at, trace.asr_final_at),
-        _elapsed_ms(trace.mt_scene_started_at, trace.mt_scene_done_at),
-        _elapsed_ms(trace.mt_translate_started_at, trace.mt_translate_done_at),
-        _elapsed_ms(trace.tts_started_at, trace.tts_ready_at),
-        _elapsed_ms(trace.asr_started_at, trace.tts_ready_at),
+        asr_latency_ms,
+        asr_first_partial_ms,
+        asr_final_tail_ms,
+        mt_scene_latency_ms,
+        asr_to_mt_gap_ms,
+        mt_latency_ms,
+        tts_queue_wait_ms,
+        tts_latency_ms,
+        tts_done_latency_ms,
+        end_to_end_latency_ms,
+        end_to_end_net_latency_ms,
+        end_to_end_done_latency_ms,
         trace.mt_scene_cache_hit,
         trace.asr_partial_count,
     )
@@ -298,7 +332,101 @@ def _observe_asr_partial(trace: _PipelineTrace, text: str) -> None:
     trace.asr_partial_count += 1
     if trace.asr_first_partial_at <= 0.0:
         trace.asr_first_partial_at = now
-    asr_log.info("partial | text=%s", text)
+
+
+class _EvalTurnExporter:
+    def __init__(self, path: Path):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._utt_counter = count(1)
+
+    @classmethod
+    def from_env(cls) -> "_EvalTurnExporter | None":
+        raw = os.getenv("EVAL_PREDICTIONS_PATH", "").strip()
+        if not raw:
+            return None
+        return cls(Path(raw))
+
+    def write(self, event: _TTSEvent, tts_result: "TTSTiming | None") -> None:
+        record = {
+            "utt_index": next(self._utt_counter),
+            "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+            "trace_id": event.trace.trace_id,
+            "source_text": event.source_text or "",
+            "translated_text": event.text,
+            "speaker_pred": event.speaker_id or "unknown",
+            "route_pred": event.route_label or "none",
+            "voice_pred": event.voice_id or "default",
+            "top1_label": event.top1_label or "none",
+            "top1_score": round(float(event.top1_score), 6),
+            "top2_label": event.top2_label or "none",
+            "top2_score": round(float(event.top2_score), 6),
+            "session_score": round(float(event.session_score), 6),
+            "registry_score": round(float(event.registry_score), 6),
+            "registry_margin": round(float(event.registry_margin), 6),
+            "asr_latency_ms": round(
+                _elapsed_ms(event.trace.asr_started_at, event.trace.asr_speech_end_at or event.trace.asr_final_at),
+                3,
+            ),
+            "asr_first_partial_ms": round(
+                _elapsed_ms(event.trace.asr_started_at, event.trace.asr_first_partial_at),
+                3,
+            ),
+            "asr_final_tail_ms": round(
+                _elapsed_ms(event.trace.asr_speech_end_at, event.trace.asr_final_at),
+                3,
+            ),
+            "mt_scene_latency_ms": round(
+                _elapsed_ms(event.trace.mt_scene_started_at, event.trace.mt_scene_done_at),
+                3,
+            ),
+            "asr_to_mt_gap_ms": round(
+                _elapsed_ms(event.trace.asr_final_at, event.trace.mt_translate_started_at),
+                3,
+            ),
+            "mt_latency_ms": round(
+                _elapsed_ms(event.trace.mt_translate_started_at, event.trace.mt_translate_done_at),
+                3,
+            ),
+            "tts_queue_wait_ms": round(
+                _elapsed_ms(event.trace.tts_queue_entered_at, event.trace.tts_started_at),
+                3,
+            ),
+            "tts_model_first_audio_ms": round(
+                _elapsed_ms(event.trace.tts_started_at, event.trace.tts_ready_at),
+                3,
+            ),
+            "tts_latency_ms": round(
+                _elapsed_ms(event.trace.tts_started_at, event.trace.tts_ready_at),
+                3,
+            ),
+            "tts_done_latency_ms": round(
+                _elapsed_ms(event.trace.tts_started_at, event.trace.tts_done_at),
+                3,
+            ),
+            "end_to_end_model_ready_ms": round(
+                _elapsed_ms(event.trace.asr_started_at, event.trace.tts_ready_at),
+                3,
+            ),
+            "end_to_end_latency_ms": round(
+                _elapsed_ms(event.trace.asr_started_at, event.trace.tts_ready_at),
+                3,
+            ),
+            "end_to_end_done_latency_ms": round(
+                _elapsed_ms(event.trace.asr_started_at, event.trace.tts_done_at),
+                3,
+            ),
+        }
+        try:
+            with self._lock:
+                with self.path.open("a", encoding="utf-8") as fp:
+                    fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            get_logger("EVAL").warning("failed to write eval prediction: %s", exc)
+
+
+_eval_exporter = _EvalTurnExporter.from_env()
 
 
 class _ASRMetrics:
@@ -1034,6 +1162,7 @@ class _QwenASRCallback:
         self.partial_queue = partial_queue
         self._partial_debug_logged = False
         self._event_debug_types_logged: set[str] = set()
+        self._event_count = 0
 
     def on_open(self):
         return None
@@ -1043,28 +1172,44 @@ class _QwenASRCallback:
 
     def on_event(self, response):
         try:
-            event_type = response.get("type", "")
-            if (
-                event_type
-                and event_type not in self._event_debug_types_logged
-                and (
-                    "transcript" in event_type
-                    or "transcription" in event_type
-                    or "audio" in event_type
-                    or "conversation.item" in event_type
+            self._event_count += 1
+            if self._event_count == 1 or self._event_count % 200 == 0:
+                asr_log.info(
+                    "qwen_callback_heartbeat | events=%s | payload_type=%s",
+                    self._event_count,
+                    type(response).__name__,
                 )
-            ):
+
+            if isinstance(response, dict):
+                event_type = response.get("type", "")
+                payload_keys = sorted(response.keys())
+            else:
+                event_type = getattr(response, "type", "") or ""
+                payload_keys = []
+            if event_type and event_type not in self._event_debug_types_logged:
                 self._event_debug_types_logged.add(event_type)
-                asr_log.info("qwen_event_debug | type=%s | payload=%s", event_type, response)
+                asr_log.info("qwen_event_debug | type=%s | keys=%s", event_type, payload_keys)
+            # Extra observability for discovering the real partial event name:
+            # when a callback payload carries transcript-like fields, log once with keys.
+            if isinstance(response, dict) and any(k in response for k in ("delta", "transcript", "text")):
+                asr_log.info(
+                    "qwen_event_fields | type=%s | keys=%s",
+                    event_type,
+                    payload_keys,
+                )
             if event_type == "response.audio_transcript.delta":
                 if not self._partial_debug_logged:
                     self._partial_debug_logged = True
-                    asr_log.info("partial_debug | payload=%s", response)
-                partial = (response.get("delta") or response.get("transcript") or "").strip()
+                    asr_log.info("partial_debug | keys=%s", payload_keys)
+                partial = ""
+                if isinstance(response, dict):
+                    partial = (response.get("delta") or response.get("transcript") or "").strip()
                 if partial:
                     self.partial_queue.put(partial)
             if event_type == "conversation.item.input_audio_transcription.completed":
-                transcript = response.get("transcript", "").strip()
+                transcript = ""
+                if isinstance(response, dict):
+                    transcript = response.get("transcript", "").strip()
                 if transcript:
                     self.final_queue.put(transcript)
         except Exception as exc:
@@ -1098,6 +1243,9 @@ class QwenStreamingASR:
         self._deferred_finals: deque[str] = deque()
         self._last_trace_candidate: _PipelineTrace | None = None
         self._last_partial_text = ""
+        self._final_wait_started_at = 0.0
+        self._final_alignment_wait_count = 0
+        self._final_alignment_fallback_count = 0
         self._connect_conversation()
 
         asr_log.info(
@@ -1193,6 +1341,14 @@ class QwenStreamingASR:
                 break
             if final:
                 self._deferred_finals.append(final)
+                if len(self._deferred_finals) >= ASR_FINAL_ALIGNMENT_MAX_DEFERRED:
+                    if len(self._deferred_finals) == ASR_FINAL_ALIGNMENT_MAX_DEFERRED or len(self._deferred_finals) % 5 == 0:
+                        asr_log.warning(
+                            "speaker_resolution_backlog | deferred_finals=%s | pending_traces=%s | active_trace=%s",
+                            len(self._deferred_finals),
+                            len(self._pending_traces),
+                            self._active_trace.trace_id if self._active_trace is not None else "none",
+                        )
 
         if not self._deferred_finals:
             return None
@@ -1202,6 +1358,7 @@ class QwenStreamingASR:
             if self._pending_traces:
                 trace = self._pending_traces.popleft()
                 speaker_decision = self._pending_speakers.popleft() if self._pending_speakers else None
+                self._final_wait_started_at = 0.0
                 if speaker_decision is None:
                     asr_log.info(
                         "speaker_resolution_missing | backend=qwen | reason=pending_trace_without_speaker | trace=%s | remaining_pending_traces=%s | remaining_pending_speakers=%s | deferred_finals=%s | final=%s",
@@ -1214,22 +1371,51 @@ class QwenStreamingASR:
         elif self._active_trace is not None:
             # The remote final transcript arrived before local VAD finalized the utterance.
             # Hold it until we have the matching speaker decision.
+            self._final_alignment_wait_count += 1
+            if self._final_wait_started_at <= 0.0:
+                self._final_wait_started_at = _now()
             asr_log.info(
-                "speaker_resolution_waiting | backend=qwen | reason=remote_final_before_local_finalize | active_trace=%s | deferred_finals=%s",
+                "speaker_resolution_waiting | backend=qwen | reason=remote_final_before_local_finalize | active_trace=%s | deferred_finals=%s | wait_ms=%.1f | wait_count=%s",
                 self._active_trace.trace_id,
                 len(self._deferred_finals),
+                _elapsed_ms(self._final_wait_started_at, _now()),
+                self._final_alignment_wait_count,
             )
             return None
         elif self._last_trace_candidate is not None:
+            if self._final_wait_started_at <= 0.0:
+                self._final_wait_started_at = _now()
+                self._final_alignment_wait_count += 1
+                asr_log.info(
+                    "speaker_resolution_waiting | backend=qwen | reason=waiting_for_pending_trace | deferred_finals=%s | pending_traces=%s | wait_window_ms=%s",
+                    len(self._deferred_finals),
+                    len(self._pending_traces),
+                    ASR_FINAL_ALIGNMENT_WAIT_MS,
+                )
+                return None
+            waited_ms = _elapsed_ms(self._final_wait_started_at, _now())
+            if waited_ms < float(ASR_FINAL_ALIGNMENT_WAIT_MS):
+                return None
             final = self._deferred_finals.popleft()
-            trace = self._last_trace_candidate
+            # Do not reuse the previous trace object; otherwise multiple finals
+            # can share one trace_id under fallback timing.
+            trace = _new_trace()
+            if self._last_trace_candidate.asr_started_at > 0.0:
+                trace.asr_started_at = self._last_trace_candidate.asr_started_at
+            else:
+                trace.asr_started_at = _now()
             speaker_decision = None
+            self._final_wait_started_at = 0.0
+            self._final_alignment_fallback_count += 1
             asr_log.info(
-                "speaker_resolution_missing | backend=qwen | reason=trace_fallback_without_pending_speaker | trace=%s | pending_traces=%s | pending_speakers=%s | deferred_finals=%s | final=%s",
+                "speaker_resolution_missing | backend=qwen | reason=trace_fallback_without_pending_speaker | fallback_from_trace=%s | new_trace=%s | pending_traces=%s | pending_speakers=%s | deferred_finals=%s | wait_ms=%.1f | fallback_count=%s | final=%s",
+                self._last_trace_candidate.trace_id,
                 trace.trace_id,
                 len(self._pending_traces),
                 len(self._pending_speakers),
                 len(self._deferred_finals),
+                waited_ms,
+                self._final_alignment_fallback_count,
                 _clip_text(final),
             )
         else:
@@ -1237,6 +1423,7 @@ class QwenStreamingASR:
             trace = _new_trace()
             trace.asr_started_at = _now()
             speaker_decision = None
+            self._final_wait_started_at = 0.0
             asr_log.info(
                 "speaker_resolution_missing | backend=qwen | reason=no_trace_candidate | pending_traces=%s | pending_speakers=%s | deferred_finals=%s | final=%s",
                 len(self._pending_traces),
@@ -1487,6 +1674,8 @@ def _run_tts(event: _TTSEvent) -> None:
             event.trace.tts_ready_at = event.trace.tts_started_at + (result.provider_ready_ms / 1000.0)
         else:
             event.trace.tts_ready_at = event.trace.tts_done_at
+        if _eval_exporter is not None:
+            _eval_exporter.write(event, result)
         _log_trace_latency(event.trace)
     except Exception as exc:
         get_logger("TTS").error("thread crashed: %s", exc)
@@ -1523,6 +1712,7 @@ def _mt_worker(stop_event: threading.Event) -> None:
             translation = translate(event.text, event.trace)
             if translation:
                 _log_turn_summary(event, translation)
+                event.trace.tts_queue_entered_at = _now()
                 if event.speaker_id:
                     speaker_log.info(
                         "speaker_route | session=%s -> registry=%s -> voice=%s | session_score=%.3f | registry_score=%.3f",
@@ -1538,8 +1728,17 @@ def _mt_worker(stop_event: threading.Event) -> None:
                         text=translation,
                         lang=MT_TARGET_LANG,
                         trace=event.trace,
+                        source_text=event.text,
                         speaker_id=event.speaker_id,
                         voice_id=event.voice_id,
+                        route_label=event.speaker_registry_sample_alias or event.speaker_registry_label or "none",
+                        top1_label=event.speaker_best_registry_label,
+                        top1_score=event.speaker_best_registry_score,
+                        top2_label=event.speaker_second_registry_label,
+                        top2_score=event.speaker_second_registry_score,
+                        session_score=event.speaker_session_score,
+                        registry_score=event.speaker_registry_score,
+                        registry_margin=event.speaker_registry_margin,
                     ),
                     "tts",
                 )
